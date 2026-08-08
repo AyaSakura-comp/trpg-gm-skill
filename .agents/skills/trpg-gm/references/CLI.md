@@ -17,6 +17,20 @@ $GM --db "$DB" events my-room
 
 Use an absolute scenario path when possible. A room cannot be silently recreated under the same id.
 
+## Player-safe recaps
+
+Save a recap at campaign creation and every natural session break:
+
+```bash
+$GM --db "$DB" recap save my-room \
+  --summary '調查者已進入舊診療所，正在追查失聯者。' \
+  --state '{"location":"後門通道","known_goals":["尋找張小姐"],"known_clues":["拖曳痕跡"],"party_conditions":["陳柏翰手部輕傷"],"immediate_danger":"診療區傳來金屬拖擦聲"}'
+
+$GM --db "$DB" recap show my-room
+```
+
+`recap save` appends a new snapshot; `recap show` returns the latest one or JSON `null` if none exists. Recaps are player-facing by design. Never place undiscovered clues, NPC secrets, scenario truth, foreshadowing, or GM notes in `summary` or `state`. Read full `context` separately for GM continuity.
+
 ## Characters
 
 ```bash

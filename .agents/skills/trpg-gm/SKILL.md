@@ -21,6 +21,20 @@ cd <directory-containing-this-SKILL.md>
 
 完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。
 
+## 遊戲入口：新團或舊團
+
+當使用者只表示想玩 TRPG／請你主持，卻沒有明確說要建立或繼續哪個 room 時，**不要立刻創造場景**。先問：
+
+> 要開一個新團，還是繼續舊團並先看 recap？
+
+- **開新團**：進入下方「開團流程」，確認 room-id、規則、劇本與角色。
+- **繼續舊團**：確認 room-id 與 DB。若使用標準路徑，可列出 `.trpg/rooms/*.sqlite3` 的檔名讓玩家選擇，但不能自行挑選。選定後先執行 `context` 驗證 room，再執行 `recap show`。
+- 有 recap 時，只向玩家顯示 recap 的 summary 與 player-safe state；不要把完整 context、secret 或 GM notes 當成 recap 輸出。
+- 沒有 recap 時，從 context 產生最小的玩家安全摘要，立即用 `recap save` 保存，再顯示給玩家。
+- 如果使用者已明確說「開新團」或「繼續 room-x」，不要重複詢問已知資訊。
+
+Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_goals`、`known_clues`、`visible_conditions`、`party_conditions`、`immediate_danger`。**禁止保存未發現線索、NPC secret、真相、伏筆或 GM notes。**
+
 ## 每回合強制流程
 
 1. **辨識 room**：確認 room-id 與 DB 路徑。不要混用其他房間。
@@ -35,6 +49,7 @@ cd <directory-containing-this-SKILL.md>
 
 - 詢問或確認：room-id、規則系統、劇本檔案路徑（可無）、基調/界線、角色資料。
 - `room create` 建立房間。若沒有劇本，明確說會即興主持，而不是假裝有原作。
+- 新團建立完成後保存第一份 player-safe recap，讓下一個 session 能辨識目前開場狀態。
 - 每位玩家用 `character add` 建立角色，至少包含 HP、MP、SAN；其他能力放在 `--stats` JSON。
 - 用 entities 建立 `scene`、`npc`、`quest`、`location`、`clue`、`faction`；狀態 JSON 應包含 `status` 與關係/可見性等必要欄位。
 - 將不可任意改寫的真相用 `canon` 固定，來源使用劇本路徑、session 編號或 `improvised:<session>`。
@@ -59,3 +74,7 @@ cd <directory-containing-this-SKILL.md>
 5. 「你要怎麼做？」
 
 不要輸出資料庫內部祕密清單。只有玩家要求查角色卡時才顯示完整玩家可見狀態。
+
+## Session 收尾
+
+在自然停點更新 scene、quest、NPC、線索與角色資源後，必須執行 `recap save`。摘要應讓完全沒有聊天記憶的新 agent 可以向玩家回顧：目前地點、已知目標、已知線索、隊伍可見狀態與眼前危險。Recap 必須是玩家安全資訊；完整世界真相仍留在 context/canon/entities 中。

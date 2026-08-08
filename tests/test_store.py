@@ -83,6 +83,28 @@ class GameStoreTests(unittest.TestCase):
                 {"status": "alive", "attitude": "guarded", "secret": "has-key"},
             )
 
+    def test_latest_player_safe_recap_persists_across_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "campaign.sqlite3"
+            store = GameStore(db)
+            store.create_room("room-a", "coc7")
+
+            first = store.save_recap(
+                "room-a",
+                "調查者抵達舊診療所。",
+                {"location": "門廊", "known_goals": ["尋找林教授"]},
+            )
+            second = store.save_recap(
+                "room-a",
+                "調查者已進入診療所。",
+                {"location": "後門通道", "known_clues": ["拖曳痕跡"]},
+            )
+
+            self.assertEqual(first["id"], 1)
+            self.assertEqual(second["id"], 2)
+            self.assertEqual(GameStore(db).get_latest_recap("room-a"), second)
+            self.assertEqual(store.list_events("room-a")[-1]["kind"], "recap_saved")
+
     def test_record_check_uses_character_stat_and_logs_result(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.sqlite3")

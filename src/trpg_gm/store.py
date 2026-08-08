@@ -73,6 +73,13 @@ class GameStore:
                     state_json TEXT NOT NULL,
                     PRIMARY KEY (room_id, kind, id)
                 );
+                CREATE TABLE IF NOT EXISTS recaps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    state_json TEXT NOT NULL
+                );
                 """
             )
 
@@ -156,6 +163,38 @@ class GameStore:
             "INSERT INTO events(room_id, created_at, kind, payload_json) VALUES (?, ?, ?, ?)",
             (room_id, datetime.now(timezone.utc).isoformat(), kind, json.dumps(payload, ensure_ascii=False)),
         )
+
+    def save_recap(
+        self, room_id: str, summary: str, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            cursor = db.execute(
+                "INSERT INTO recaps(room_id, created_at, summary, state_json) VALUES (?, ?, ?, ?)",
+                (room_id, created_at, summary, json.dumps(state, ensure_ascii=False)),
+            )
+            recap = {
+                "id": cursor.lastrowid,
+                "room_id": room_id,
+                "created_at": created_at,
+                "summary": summary,
+                "state": state,
+            }
+            self._append_event(db, room_id, "recap_saved", recap)
+        return recap
+
+    def get_latest_recap(self, room_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT id, room_id, created_at, summary, state_json
+                FROM recaps WHERE room_id = ? ORDER BY id DESC LIMIT 1""",
+                (room_id,),
+            ).fetchone()
+        if not row:
+            return None
+        recap = dict(row)
+        recap["state"] = json.loads(recap.pop("state_json"))
+        return recap
 
     def record_check(
         self, room_id: str, character_id: str, stat: str, *, roll: int

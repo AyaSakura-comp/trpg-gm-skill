@@ -47,4 +47,4 @@ If sources disagree, pause and identify the conflict. Prefer scenario text over 
 
 ## Session close
 
-At a natural break, update all active scene/quest/NPC states, resource changes and newly established canon. Then provide a player-safe recap: current location, known goals, known clues, visible conditions and unresolved immediate danger. Do not include secrets.
+At a natural break, update all active scene/quest/NPC states, resource changes and newly established canon. Then save and present a player-safe recap: current location, known goals, known clues, visible party conditions and unresolved immediate danger. Do not include secrets. The next independent agent session must use `recap show` for the player-facing review and `context` separately for private GM continuity.

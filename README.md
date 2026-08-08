@@ -29,6 +29,7 @@ AI Agent
              ├── 玩家角色、HP／MP／SAN、能力
              ├── NPC、支線、場景、地點、線索
              ├── canon 固定事實
+             ├── player-safe session recaps
              └── append-only 事件與判定紀錄
 ```
 
@@ -88,6 +89,7 @@ Python 程式位於 `src/trpg_gm/`。它不創作故事，也不自行決定 NPC
 - 執行並保存 d100 判定
 - 取得完整 room context
 - 查詢事件紀錄
+- 保存與讀取最新的玩家安全 recap
 
 所有結果都輸出 JSON，方便 agent 重新讀取。
 
@@ -100,6 +102,7 @@ Python 程式位於 `src/trpg_gm/`。它不創作故事，也不自行決定 NPC
 - 將資源變動、entity 更新與判定寫入事件紀錄。
 - 遇到 canon 舊值與新值不同時直接拒絕，防止 agent 靜默吃書。
 - 將 room、角色、canon、entities 與 recent events 組合成每回合 context。
+- 以 append-only snapshots 保存 player-safe recaps，供新 session 回顧舊團。
 
 ### `rules.py`
 
@@ -127,6 +130,23 @@ SQLite 是遊戲狀態的持久化來源。即使 agent 重啟、對話被截斷
 資料庫不是玩家可見的完整敘事。裡面可能包含 NPC 祕密與未發現線索；agent 必須依照 Skill 的資訊分層規則決定哪些內容能說出口。
 
 ## 完整遊戲 Workflow
+
+### 0. 選擇開新團或繼續舊團
+
+如果玩家只說想玩 TRPG，卻沒有指定 room，GM 先問：
+
+> 要開一個新團，還是繼續舊團並先看 recap？
+
+- **新團**：進入建房、劇本與創角流程。
+- **舊團**：請玩家選擇 room，不能由 agent 自行猜測。Agent 私下讀 `context` 恢復完整 GM 狀態，再用 `recap show` 取得玩家可見摘要。
+
+```bash
+GM=.agents/skills/trpg-gm/scripts/trpg-gm
+$GM --db "$DB" context demo
+$GM --db "$DB" recap show demo
+```
+
+`context` 可能含有 NPC secret 與未發現線索，只能供 GM 判斷；`recap` 專門保存可以直接告訴玩家的內容。若舊團尚無 recap，agent 應從 context 整理最小的玩家安全摘要、保存後再顯示。
 
 ### 1. 建立遊戲房間
 
@@ -266,8 +286,15 @@ Agent 在自然停點前應：
 - 保存 HP／MP／SAN 變化
 - 將穩定且重要的新事實寫入 canon
 - 產生不包含祕密的玩家摘要
+- 使用 `recap save` 保存該摘要
 
-下一次遊戲只要使用相同的 room-id 與 DB，就能從 `context` 繼續。
+```bash
+$GM --db "$DB" recap save miskatonic \
+  --summary '調查者已進入舊診療所。' \
+  --state '{"location":"後門通道","known_goals":["尋找失聯者"],"known_clues":["拖曳痕跡"],"party_conditions":["陳柏翰手部輕傷"],"immediate_danger":"深處傳來金屬聲"}'
+```
+
+Recap 不可包含未發現線索、NPC secret、劇本真相、伏筆或 GM notes。下一次遊戲使用相同 room-id 與 DB 時，agent 以 `context` 恢復主持狀態，以 `recap show` 向玩家回顧舊團。
 
 ## Skill 與 Python 的責任邊界
 
@@ -282,7 +309,7 @@ Agent 在自然停點前應：
 | 哪些資訊能告訴玩家？ | 根據角色認知決定 | 不負責資訊揭露 |
 | 防止不同 room 串資料 | 選對 room-id | 以 room-id／DB 隔離 |
 | 防止 canon 被改寫 | 發現衝突後解釋或詢問 | 拒絕不同值覆寫 |
-| 對話中斷後恢復 | 重新呼叫 context | 持久保存狀態 |
+| 對話中斷後恢復 | 讀 context，向玩家顯示 recap | 持久保存完整狀態與安全摘要 |
 
 簡單說：**Skill 管主持決策與流程，Python 管可驗證的狀態與規則。**
 
@@ -324,6 +351,7 @@ PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests -
 
 驗證：
 
+- 未指定 room 的模糊開場會先詢問「新團或舊團 recap」，不會擅自建立遊戲。
 - 三名玩家能在同一個 room 建立角色。
 - 不同 Pi sessions 不共用聊天歷史，只共用 campaign DB。
 - 新 session 會先執行 `context`，而不是自行猜測前情。
@@ -500,6 +528,7 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 - 每個 gameplay session 在敘事前呼叫 `context`。
 - 判定與資源變化存在事件紀錄。
 - Entity partial update 不會移除未提供欄位。
+- Session 收尾保存 player-safe recap；舊團入口顯示 recap，而不是完整私密 context。
 - 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
 
 本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。

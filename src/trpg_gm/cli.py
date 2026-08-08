@@ -66,6 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("stat")
     check.add_argument("--roll", type=int, help="Explicit d100 result; random if omitted")
 
+    recap = commands.add_parser("recap")
+    recap_commands = recap.add_subparsers(dest="action", required=True)
+    recap_save = recap_commands.add_parser("save")
+    recap_save.add_argument("room_id")
+    recap_save.add_argument("--summary", required=True)
+    recap_save.add_argument("--state", type=_json, required=True)
+    recap_show = recap_commands.add_parser("show")
+    recap_show.add_argument("room_id")
+
     context = commands.add_parser("context")
     context.add_argument("room_id")
     context.add_argument("--events", type=int, default=20)
@@ -101,6 +110,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "check":
         roll = args.roll if args.roll is not None else random.SystemRandom().randint(1, 100)
         result = store.record_check(args.room_id, args.character_id, args.stat, roll=roll)
+    elif args.command == "recap" and args.action == "save":
+        result = store.save_recap(args.room_id, args.summary, args.state)
+    elif args.command == "recap" and args.action == "show":
+        result = store.get_latest_recap(args.room_id)
     elif args.command == "context":
         result = store.get_context(args.room_id, event_limit=args.events)
     elif args.command == "events":
