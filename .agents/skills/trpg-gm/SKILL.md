@@ -10,9 +10,10 @@ compatibility: Requires Python 3.10+ and filesystem access. Uses only the Python
 
 ## 工具入口
 
-從本 skill 目錄執行：
+CLI 路徑是「目前載入的 `SKILL.md` 所在目錄」下的 `scripts/trpg-gm`。第一次呼叫前先 `cd` 到該 skill 目錄；不要在 repository root 直接執行不存在的 `./scripts/trpg-gm`：
 
 ```bash
+cd <directory-containing-this-SKILL.md>
 ./scripts/trpg-gm --db <ROOM_DB> <command...>
 ```
 

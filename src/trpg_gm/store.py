@@ -195,13 +195,22 @@ class GameStore:
         self, room_id: str, kind: str, entity_id: str, name: str, state: dict[str, Any]
     ) -> None:
         with self._connect() as db:
+            existing = db.execute(
+                "SELECT state_json FROM entities WHERE room_id = ? AND kind = ? AND id = ?",
+                (room_id, kind, entity_id),
+            ).fetchone()
+            merged_state = json.loads(existing["state_json"]) if existing else {}
+            merged_state.update(state)
             db.execute(
                 """INSERT INTO entities(room_id, kind, id, name, state_json) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(room_id, kind, id) DO UPDATE SET name=excluded.name, state_json=excluded.state_json""",
-                (room_id, kind, entity_id, name, json.dumps(state, ensure_ascii=False)),
+                (room_id, kind, entity_id, name, json.dumps(merged_state, ensure_ascii=False)),
             )
             self._append_event(
-                db, room_id, "entity_upserted", {"kind": kind, "id": entity_id, "name": name, "state": state}
+                db,
+                room_id,
+                "entity_upserted",
+                {"kind": kind, "id": entity_id, "name": name, "state": merged_state},
             )
 
     def get_context(self, room_id: str, *, event_limit: int = 20) -> dict[str, Any]:

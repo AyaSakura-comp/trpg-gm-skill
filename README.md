@@ -241,7 +241,7 @@ $GM --db "$DB" entity miskatonic npc caretaker '老管理員' \
   --state '{"status":"alive","location":"basement","attitude":"hostile","secret":"has-key"}'
 ```
 
-`entity` 是完整狀態的 upsert，不是局部 patch，因此 agent 更新前要先讀 context，保留沒有改變的欄位。
+`entity` 是 merge-upsert：有提供的 key 會更新，沒提供的欄位會保留。這可避免 agent 只更新 NPC 態度時，意外刪掉既有祕密或其他狀態；目前尚未提供刪除單一欄位的命令。
 
 ### 7. 回覆玩家
 
@@ -316,7 +316,7 @@ PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests -
 
 - `room.system` 可以記錄任意系統，但內建判定器目前只實作 CoC 類 d100。
 - 其他規則系統應新增 rules adapter；在此之前，agent 不應把 d100 冒充其他系統的正式規則。
-- 目前 entity 更新採完整 upsert，尚未提供局部 patch 或自動 schema 驗證。
+- Entity 更新採 merge-upsert，尚未提供刪除單一欄位或自動 schema 驗證。
 - Canon 刻意禁止靜默覆寫；正式 retcon 需要先告知玩家，未來可加入專用 retcon event。
 
 ## 專案結構

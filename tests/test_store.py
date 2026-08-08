@@ -64,6 +64,25 @@ class GameStoreTests(unittest.TestCase):
             self.assertEqual(context["canon"]["npc:lin:status"], "失蹤")
             self.assertEqual(context["entities"][0]["state"]["status"], "active")
 
+    def test_entity_update_preserves_unspecified_state_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.sqlite3")
+            store.create_room("room-a", "coc7")
+            store.upsert_entity(
+                "room-a", "npc", "keeper", "管理員",
+                {"status": "alive", "attitude": "wary", "secret": "has-key"},
+            )
+
+            store.upsert_entity(
+                "room-a", "npc", "keeper", "管理員", {"attitude": "guarded"}
+            )
+
+            entity = store.get_context("room-a")["entities"][0]
+            self.assertEqual(
+                entity["state"],
+                {"status": "alive", "attitude": "guarded", "secret": "has-key"},
+            )
+
     def test_record_check_uses_character_stat_and_logs_result(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.sqlite3")
