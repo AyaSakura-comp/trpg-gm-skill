@@ -3,6 +3,40 @@ import { fileURLToPath } from "node:url";
 const ACTIVATION_PATTERN = /(?:\/skill:trpg-gm|開(?:一個)?新團|繼續舊團|(?:想|要|來|開始|繼續|玩|play|start|resume).{0,24}\bTRPG\b|(?:請(?:你)?|讓你)?(?:當|作為)\s*(?:TRPG\s*)?GM\b|主持.{0,20}(?:TRPG|CoC|克蘇魯|冒險|團))/iu;
 const CLI_WRAPPER = fileURLToPath(new URL("../.agents/skills/trpg-gm/scripts/trpg-gm", import.meta.url));
 const SKILL_MARKER = "# Persistent TRPG GM";
+const DEGREE_LABELS = {
+  critical: "大成功",
+  extreme: "極難成功",
+  hard: "困難成功",
+  success: "成功",
+  failure: "失敗",
+  fumble: "大失敗",
+};
+
+function parseCheckReport(stdout) {
+  let value;
+  try {
+    value = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`Successful check returned invalid JSON: ${error.message}`);
+  }
+  const required = ["character_id", "stat", "roll", "target", "degree"];
+  const missing = required.filter((key) => value?.[key] === undefined);
+  if (missing.length > 0) {
+    throw new Error(`Successful check omitted report fields: ${missing.join(", ")}.`);
+  }
+  return {
+    characterId: String(value.character_id),
+    stat: String(value.stat),
+    roll: Number(value.roll),
+    target: Number(value.target),
+    degree: String(value.degree),
+  };
+}
+
+function formatCheckReport(check) {
+  const label = DEGREE_LABELS[check.degree] ?? check.degree;
+  return `- ${check.characterId} 的${check.stat}：${label}（${check.degree}，roll ${check.roll}，目標 ${check.target}）`;
+}
 
 export function shouldActivateFromText(text) {
   return ACTIVATION_PATTERN.test(text ?? "");
@@ -36,6 +70,8 @@ function freshTurn() {
     contextRoom: null,
     operationRooms: new Set(),
     checkResolved: false,
+    checkReports: [],
+    checkReportAppended: false,
     mutationPersisted: false,
     finalized: false,
     reminderSent: false,
@@ -52,6 +88,7 @@ function checklist() {
     "5. After all state commands finish, call trpg_turn_finalize in a separate tool round before the final player-facing answer.",
     "6. Use turnKind=clarification only when you must ask for a missing room/setup choice before gameplay; otherwise use gameplay.",
     "7. If a check caused no persistent change, explain why in noStateChangeReason; never use that field to avoid saving a discovered clue.",
+    "8. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
   ].join("\n");
 }
 
@@ -134,7 +171,10 @@ export default function trpgGmGuard(pi) {
         turn.contextRoom = operation.contextRoom;
       }
       if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
-      turn.checkResolved ||= operation.check;
+      if (operation.check) {
+        turn.checkReports.push(parseCheckReport(result.stdout));
+        turn.checkResolved = true;
+      }
       turn.mutationPersisted ||= operation.mutation;
       turn.finalized = false;
       return {
@@ -220,9 +260,23 @@ export default function trpgGmGuard(pi) {
           checkResolved: turn.checkResolved,
           mutationPersisted: turn.mutationPersisted,
           stateChanges: params.stateChanges,
+          checkReports: turn.checkReports,
         },
       };
     },
+  });
+
+  pi.on("message_end", async (event) => {
+    if (!active || !turn.finalized || turn.checkReportAppended) return undefined;
+    if (event.message.role !== "assistant" || turn.checkReports.length === 0) return undefined;
+
+    const block = `**判定結果**\n${turn.checkReports.map(formatCheckReport).join("\n")}`;
+    const content = Array.isArray(event.message.content)
+      ? [...event.message.content]
+      : [{ type: "text", text: String(event.message.content ?? "") }];
+    content.push({ type: "text", text: `\n\n${block}` });
+    turn.checkReportAppended = true;
+    return { message: { ...event.message, content } };
   });
 
   pi.on("agent_settled", async () => {

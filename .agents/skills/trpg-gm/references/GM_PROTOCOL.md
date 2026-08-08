@@ -31,7 +31,7 @@ Call for a roll only when all are true:
 - failure has a meaningful consequence;
 - no previously established fact already settles it.
 
-Before rolling, state what is being tested and the apparent stakes. Apply the recorded result. Hidden modifiers are allowed only when grounded in established fiction/rules; do not fabricate them after seeing the roll.
+Before rolling, state what is being tested and the apparent stakes. Apply the recorded result. Every check must be reported to the player with character, stat, raw roll, target, and degree; narration alone is not a check report. Translate degrees consistently: `critical=大成功`, `extreme=極難成功`, `hard=困難成功`, `success=成功`, `failure=失敗`, and `fumble=大失敗`. Hidden modifiers are allowed only when grounded in established fiction/rules; do not fabricate them after seeing the roll.
 
 ## Continuity guard
 

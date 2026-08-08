@@ -41,13 +41,39 @@ const context = (entries = []) => ({
   ui: { notify() {} },
 });
 
-const runCli = (pi, args, db = "/tmp/game.sqlite3") =>
-  pi.tools.get("trpg_gm_cli").execute("cli-call", { db, args });
+const runCli = async (pi, args, db = "/tmp/game.sqlite3") => {
+  const original = pi.execResult;
+  if (args[0] === "check" && original.stdout === '{"ok":true}') {
+    pi.execResult = {
+      ...original,
+      stdout: JSON.stringify({
+        character_id: args[2],
+        stat: args[3],
+        roll: 20,
+        target: 60,
+        degree: "hard",
+      }),
+    };
+  }
+  try {
+    return await pi.tools.get("trpg_gm_cli").execute("cli-call", { db, args });
+  } finally {
+    pi.execResult = original;
+  }
+};
 
 test("package manifest exposes both the Pi skill and extension", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url)));
   assert.deepEqual(manifest.pi.skills, ["./.agents/skills/trpg-gm"]);
   assert.deepEqual(manifest.pi.extensions, ["./extensions/trpg-gm-guard.js"]);
+});
+
+test("skill protocol requires player-facing reports for every check", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /每次判定結果/);
+  assert.match(skill, /roll/);
+  assert.match(skill, /目標值/);
+  assert.match(skill, /成功等級/);
 });
 
 test("activation recognizes gameplay but ignores development prompts", () => {
@@ -240,6 +266,57 @@ test("successful CLI help output does not poison room tracking", async () => {
     playerAgencyChecked: true,
   });
   assert.match(result.content[0].text, /validated/i);
+});
+
+test("final player-facing answer reports every resolved check canonically", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      character_id: "pc",
+      stat: "察覺",
+      roll: 27,
+      target: 60,
+      degree: "hard",
+    }),
+    stderr: "",
+    killed: false,
+  };
+  await runCli(pi, ["check", "room-a", "pc", "察覺"]);
+
+  await pi.tools.get("trpg_turn_finalize").execute("check-report", {
+    turnKind: "gameplay",
+    roomId: "room-a",
+    stateChanges: [],
+    noStateChangeReason: "判定只決定玩家當下察覺程度，沒有建立持久狀態",
+    secretsChecked: true,
+    playerAgencyChecked: true,
+  });
+
+  const amended = await pi.handlers.get("message_end")({
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "你在門縫裡看見一小段纖維。" }],
+    },
+  }, ctx);
+
+  assert.ok(amended, "guard must amend a final answer that omits its check result");
+  const text = amended.message.content.map((part) => part.text ?? "").join("");
+  assert.match(text, /判定結果/);
+  assert.match(text, /pc/);
+  assert.match(text, /察覺/);
+  assert.match(text, /困難成功/);
+  assert.match(text, /hard/);
+  assert.match(text, /roll 27/);
+  assert.match(text, /目標 60/);
 });
 
 test("failed structured CLI calls do not satisfy context tracking", async () => {
