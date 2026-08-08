@@ -308,9 +308,201 @@ Pi 在信任此 repo 後會從 `.agents/skills/` 自動發現 Skill。其他支�
 
 ## 測試
 
+### Python 單元測試
+
 ```bash
 PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests -v
 ```
+
+這組測試驗證 SQLite migration、room 隔離、角色資源、canon 衝突、entity merge-upsert、事件紀錄與 d100 判定。
+
+### Pi Agent 多 Session 實玩測試
+
+單元測試只能證明 Python 層正確；還需要確認真正的 agent 會載入 Skill、遵守 GM workflow，並在沒有聊天記憶時從 SQLite 接續遊戲。建議使用以下方法進行端對端測試。
+
+#### 測試目標
+
+驗證：
+
+- 三名玩家能在同一個 room 建立角色。
+- 不同 Pi sessions 不共用聊天歷史，只共用 campaign DB。
+- 新 session 會先執行 `context`，而不是自行猜測前情。
+- 判定、HP／MP／SAN、NPC、線索、scene 和 quest 都會持久保存。
+- Agent 不會透露 `secret`，也不會替玩家決定行動。
+- 更新少數 entity 欄位時，不會刪掉未提供的隱藏狀態。
+
+#### 1. 建立隔離的測試環境
+
+```bash
+cd trpg-gm-skill
+
+RUN="$(mktemp -d /tmp/trpg-gm-luna-e2e-XXXXXX)"
+DB="$RUN/campaign.sqlite3"
+SESSION_DIR="$RUN/pi-sessions"
+ROOM=luna-playtest
+mkdir -p "$SESSION_DIR"
+```
+
+測試資料放在 `/tmp`，避免污染正式 campaign。所有 sessions 使用相同的 `$DB` 與 `$ROOM`，但每次 Pi invocation 都建立新的 session；**不要使用 `--continue`**。
+
+以下範例使用 GPT-5.6 Luna。執行前需要在 Pi 完成 `openai-codex` 登入：
+
+```bash
+run_luna() {
+  local session_name="$1"
+  local prompt="$2"
+
+  pi \
+    --provider openai-codex \
+    --model gpt-5.6-luna \
+    --thinking medium \
+    --session-dir "$SESSION_DIR" \
+    --name "$session_name" \
+    --approve \
+    --no-extensions \
+    --no-skills \
+    --skill .agents/skills/trpg-gm/SKILL.md \
+    -p "$prompt"
+}
+```
+
+`--no-skills` 加上明確的 `--skill` 可以避免其他已安裝 Skill 干擾測試；`--approve` 讓非互動模式信任 project-local Skill。
+
+#### 2. Session 1：創角與開場
+
+```bash
+run_luna session-1 "$(cat <<EOF
+/skill:trpg-gm
+你是 TRPG GM。不要修改專案程式碼。
+room-id：$ROOM
+DB：$DB
+沒有劇本，直接採即興 CoC7 恐怖故事。
+請在同一個 room 建立：
+- yuching／林雨晴，醫師，HP 12、MP 10、SAN 65；急救75、觀察55、心理學50。
+- bohan／陳柏翰，工程師，HP 13、MP 8、SAN 60；機械維修70、聆聽55、力量60。
+- siyu／吳思妤，民俗學者，HP 9、MP 14、SAN 70；圖書館使用80、神秘學70、說服60。
+使用 CLI 真正保存角色，並建立初始 scene、NPC、active quest 與至少一項 canon。
+最後提供不洩密的開場，並問玩家要怎麼做。
+EOF
+)"
+```
+
+完成後直接檢查 DB，不要只相信 agent 的文字回覆：
+
+```bash
+.agents/skills/trpg-gm/scripts/trpg-gm \
+  --db "$DB" context "$ROOM" --events 50
+```
+
+此時應有三名角色、至少一個 scene、NPC、active quest 與 canon。
+
+#### 3. Session 2：無聊天記憶接續三名玩家
+
+重新執行 `run_luna` 會建立另一個 Pi session：
+
+```bash
+run_luna session-2 "$(cat <<EOF
+/skill:trpg-gm
+這是新的 Pi session；你沒有上一個 session 的聊天記憶。
+room-id：$ROOM
+DB：$DB
+先用 context 讀取狀態，再主持這一輪：
+- 林雨晴檢查後門拖痕。
+- 陳柏翰檢查故障配電箱。
+- 吳思妤詢問 NPC 最後一次聯絡內容。
+符合條件時用 CLI 擲骰並接受結果。保存線索、傷害、NPC、scene 與 quest 變化；不得洩漏 secret。
+EOF
+)"
+```
+
+檢查回覆與 DB 是否一致，例如 agent 若描述角色損失 1 HP，`context` 中也必須真的少 1 HP，且 recent events 應存在 `check_resolved` 和 `resource_changed`。
+
+#### 4. Session 3：再次恢復與 Session recap
+
+```bash
+run_luna session-3 "$(cat <<EOF
+/skill:trpg-gm
+這是第三個獨立 Pi session。只能依靠持久狀態接續。
+room-id：$ROOM
+DB：$DB
+先讀 context。三位玩家沿既有線索進入建築：
+- 林雨晴判斷暗紅斑點是否為血。
+- 陳柏翰注意室內聲音來源。
+- 吳思妤判斷痕跡是否符合民俗儀式。
+使用既有角色能力進行合理判定，保存所有結果。只有真正出現恐怖刺激時才能處理 SAN。
+結尾提供不洩密的 session recap，再問下一步。
+EOF
+)"
+```
+
+這一輪主要驗證新 agent 能否正確恢復角色位置、先前失敗、已發現線索、NPC 態度和 active quest，而不是重新創造一套不相干的劇情。
+
+#### 5. 驗證最終狀態
+
+```bash
+GM=.agents/skills/trpg-gm/scripts/trpg-gm
+$GM --db "$DB" context "$ROOM" --events 100 > "$RUN/final-context.json"
+
+python3 - "$RUN/final-context.json" <<'PY'
+import json
+import sys
+
+context = json.load(open(sys.argv[1]))
+assert len(context["characters"]) == 3
+assert context["room"]["id"] == "luna-playtest"
+assert any(e["kind"] == "quest" for e in context["entities"])
+assert any(e["kind"] == "scene" for e in context["entities"])
+assert any(e["kind"] == "check_resolved" for e in context["recent_events"])
+print("multi-session state OK")
+PY
+```
+
+也要人工檢查三份 response：
+
+- 敘事中的骰子與 DB event 相同。
+- 敘事中的資源變動與角色資料相同。
+- 沒有輸出 DB 中尚未公開的 secret。
+- 沒有替玩家角色發言或決定下一步。
+- 每個 session 最後都有把控制權交還玩家。
+
+#### 6. Entity hidden-state regression smoke test
+
+先加入只有 GM 知道的欄位：
+
+```bash
+$GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
+  --state '{"status":"alive","attitude":"wary","secret":"has-key"}'
+
+$GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
+  --state '{"attitude":"cooperative"}'
+```
+
+再次讀取 context，預期得到：
+
+```json
+{
+  "status": "alive",
+  "attitude": "cooperative",
+  "secret": "has-key"
+}
+```
+
+這可驗證 merge-upsert 不會因 agent 只更新態度就遺失 secret。玩家可見回覆仍不得透露 `has-key`。
+
+#### 通過標準
+
+只有以下條件全部成立才算通過：
+
+- Python 單元測試全部成功且沒有 ResourceWarning。
+- 至少三個獨立 Pi session files 被建立。
+- 三個 sessions 使用同一個 room DB，且沒有使用聊天 session continuation。
+- 三名角色與所有資源跨 session 一致。
+- 每個 gameplay session 在敘事前呼叫 `context`。
+- 判定與資源變化存在事件紀錄。
+- Entity partial update 不會移除未提供欄位。
+- 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
+
+本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。
 
 ## 目前邊界
 
@@ -334,6 +526,8 @@ trpg-gm-skill/
 │   ├── rules.py
 │   └── store.py
 ├── tests/
+├── docs/
+│   └── LUNA_PLAYTEST.md
 ├── pyproject.toml
 └── README.md
 ```
