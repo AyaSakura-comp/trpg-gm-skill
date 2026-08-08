@@ -116,6 +116,16 @@ test("skill protocol requires persisted action adjudication outside the prompt",
   assert.match(cliReference, /action_adjudicated/);
 });
 
+test("skill protocol documents persistent world-aware character creation", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  const cliReference = await readFile(new URL("../.agents/skills/trpg-gm/references/CLI.md", import.meta.url), "utf8");
+  for (const phrase of ["creation configure", "creation propose", "creation roll", "外觀", "recommended_skills", "max_party_difference"]) {
+    assert.match(skill + cliReference, new RegExp(phrase));
+  }
+  assert.match(skill, /玩家.*決定.*技能|技能.*玩家.*決定/);
+  assert.match(skill, /不符合.*世界觀.*拒絕|拒絕.*不符合.*世界觀/);
+});
+
 test("activation recognizes gameplay but ignores development prompts", () => {
   assert.equal(shouldActivateFromText("/skill:trpg-gm 我想繼續舊團"), true);
   assert.equal(shouldActivateFromText("請當 GM 主持一場克蘇魯冒險"), true);
@@ -318,6 +328,152 @@ test("successful CLI help output does not poison room tracking", async () => {
     playerAgencyChecked: true,
   });
   assert.match(result.content[0].text, /validated/i);
+});
+
+test("character creation proposals are tracked and rejected concepts report reasons", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 開新團", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      character_id: "pc",
+      name: "艾莉絲",
+      appearance: "背後長著龍翼",
+      background: "異世界龍騎士",
+      concept: "能飛行與噴火的龍裔",
+      skills: ["飛行"],
+      decision: "rejected",
+      basis: "本團是現代寫實世界",
+      reason: "龍翼與飛行技能不符合世界觀",
+      draft_id: 1,
+    }),
+    stderr: "",
+    killed: false,
+  };
+  await runCli(pi, [
+    "creation", "propose", "room-a", "pc", "艾莉絲",
+    "--appearance", "背後長著龍翼", "--background", "異世界龍騎士",
+    "--concept", "能飛行與噴火的龍裔", "--skills", '["飛行"]',
+    "--decision", "rejected", "--basis", "本團是現代寫實世界",
+    "--reason", "龍翼與飛行技能不符合世界觀",
+  ]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      character_id: "pc",
+      name: "艾莉絲",
+      appearance: "黑髮記者",
+      background: "地方報社",
+      concept: "追查失蹤案的記者",
+      skills: ["偵查"],
+      decision: "accepted",
+      basis: "符合現代寫實劇本",
+      reason: "修訂後的角色符合世界觀",
+      draft_id: 2,
+    }),
+    stderr: "",
+    killed: false,
+  };
+  await runCli(pi, [
+    "creation", "propose", "room-a", "pc", "艾莉絲",
+    "--appearance", "黑髮記者", "--background", "地方報社",
+    "--concept", "追查失蹤案的記者", "--skills", '["偵查"]',
+    "--decision", "accepted", "--basis", "符合現代寫實劇本",
+    "--reason", "修訂後的角色符合世界觀",
+  ]);
+
+  await pi.tools.get("trpg_turn_finalize").execute("creation-rejected", {
+    turnKind: "gameplay",
+    roomId: "room-a",
+    playerActionStatus: "not_applicable",
+    noPlayerActionReason: "此回合正在進行開團捏角，沒有遊戲內角色行動",
+    stateChanges: ["保存被拒絕的角色提案"],
+    secretsChecked: true,
+    playerAgencyChecked: true,
+  });
+  const amended = await pi.handlers.get("message_end")({
+    message: { role: "assistant", content: [{ type: "text", text: "請調整角色設定。" }] },
+  }, ctx);
+  const text = amended.message.content.map((part) => part.text ?? "").join("");
+  assert.match(text, /角色提案裁定/);
+  assert.match(text, /不允許/);
+  assert.match(text, /龍翼與飛行技能不符合世界觀/);
+  assert.match(text, /本團是現代寫實世界/);
+});
+
+test("character generation reports rolled skill values and resource maxima", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 開新團", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      id: "pc",
+      name: "艾莉絲",
+      stats: { "偵查": 80, "聆聽": 20 },
+      max_hp: 9,
+      max_mp: 7,
+      max_san: 46,
+      generation: {
+        skill_rolls: { "偵查": 100, "聆聽": 1 },
+        resource_rolls: { hp: 1, mp: 1, san: 1 },
+        maxima: { hp: 9, mp: 7, san: 46 },
+      },
+    }),
+    stderr: "",
+    killed: false,
+  };
+  await runCli(pi, ["creation", "roll", "room-a", "pc"]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      id: "pc2",
+      name: "鮑伯",
+      stats: { "圖書館使用": 50 },
+      max_hp: 10,
+      max_mp: 8,
+      max_san: 50,
+      generation: {
+        skill_rolls: { "圖書館使用": 50 },
+        resource_rolls: { hp: 2, mp: 2, san: 5 },
+        maxima: { hp: 10, mp: 8, san: 50 },
+      },
+    }),
+    stderr: "",
+    killed: false,
+  };
+  await runCli(pi, ["creation", "roll", "room-a", "pc2"]);
+  await pi.tools.get("trpg_turn_finalize").execute("creation-roll", {
+    turnKind: "gameplay",
+    roomId: "room-a",
+    playerActionStatus: "not_applicable",
+    noPlayerActionReason: "此回合正在捏角，沒有遊戲內角色行動",
+    stateChanges: ["生成角色技能與 HP/MP/SAN 上限"],
+    secretsChecked: true,
+    playerAgencyChecked: true,
+  });
+  const amended = await pi.handlers.get("message_end")({
+    message: { role: "assistant", content: [{ type: "text", text: "角色建立完成。" }] },
+  }, ctx);
+  const text = amended.message.content.map((part) => part.text ?? "").join("");
+  assert.match(text, /角色生成結果/);
+  assert.match(text, /艾莉絲/);
+  assert.match(text, /鮑伯/);
+  assert.match(text, /偵查.*roll 100.*80/);
+  assert.match(text, /聆聽.*roll 1.*20/);
+  assert.match(text, /HP.*roll 1.*9/);
+  assert.match(text, /SAN.*roll 1.*46/);
 });
 
 test("player actions require persisted adjudication and rejected actions report reasons", async () => {

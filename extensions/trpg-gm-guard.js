@@ -38,6 +38,52 @@ function formatCheckReport(check) {
   return `- ${check.characterId} 的${check.stat}：${label}（${check.degree}，roll ${check.roll}，目標 ${check.target}）`;
 }
 
+function parseCharacterGeneration(stdout) {
+  let value;
+  try {
+    value = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`Successful character generation returned invalid JSON: ${error.message}`);
+  }
+  if (!value?.id || !value?.name || !value?.stats || !value?.generation?.skill_rolls
+      || !value?.generation?.resource_rolls || !value?.generation?.maxima) {
+    throw new Error("Successful character generation omitted rolled abilities or resource maxima.");
+  }
+  return {
+    characterId: String(value.id),
+    name: String(value.name),
+    stats: value.stats,
+    skillRolls: value.generation.skill_rolls,
+    resourceRolls: value.generation.resource_rolls,
+    maxima: value.generation.maxima,
+  };
+}
+
+function parseCharacterProposal(stdout) {
+  let value;
+  try {
+    value = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`Successful character proposal returned invalid JSON: ${error.message}`);
+  }
+  const required = ["character_id", "name", "appearance", "background", "concept", "decision", "basis", "reason"];
+  const missing = required.filter((key) => !String(value?.[key] ?? "").trim());
+  if (missing.length > 0 || !Array.isArray(value?.skills)) {
+    throw new Error(`Successful character proposal omitted fields: ${missing.join(", ") || "skills"}.`);
+  }
+  return {
+    characterId: String(value.character_id),
+    name: String(value.name),
+    appearance: String(value.appearance),
+    background: String(value.background),
+    concept: String(value.concept),
+    skills: value.skills.map(String),
+    decision: String(value.decision),
+    basis: String(value.basis),
+    reason: String(value.reason),
+  };
+}
+
 function parseActionAdjudication(stdout) {
   let value;
   try {
@@ -72,6 +118,17 @@ function classifyCliArgs(args) {
   }
   const [command, actionOrRoom, maybeRoom] = args;
   if (command === "context") return { contextRoom: actionOrRoom, operationRoom: null, action: false, check: false, mutation: false };
+  if (command === "creation") {
+    return {
+      contextRoom: null,
+      operationRoom: maybeRoom,
+      action: false,
+      characterProposal: actionOrRoom === "propose",
+      characterGenerated: actionOrRoom === "roll",
+      check: false,
+      mutation: actionOrRoom !== "show",
+    };
+  }
   if (command === "action" && actionOrRoom === "adjudicate") {
     return { contextRoom: null, operationRoom: maybeRoom, action: true, check: false, mutation: false };
   }
@@ -100,6 +157,10 @@ function freshTurn() {
     latestActionIndex: null,
     checkOperationIndices: [],
     mutationOperationIndices: [],
+    characterProposals: [],
+    characterProposalReportsAppended: 0,
+    characterGenerations: [],
+    characterGenerationReportsAppended: 0,
     actionAdjudications: [],
     actionRulingAppended: false,
     checkResolved: false,
@@ -122,7 +183,8 @@ function checklist() {
     "6. Use turnKind=clarification only when you must ask for a missing room/setup choice before gameplay; otherwise use gameplay.",
     "7. If a check caused no persistent change, explain why in noStateChangeReason; never use that field to avoid saving a discovered clue.",
     "8. Before resolving a declared player action, adjudicate it with trpg_gm_cli action adjudicate against the script, canon, rules, and established state. Reject unsupported or impossible actions with a concrete basis and reason; do not roll or mutate state for a rejected action.",
-    "9. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
+    "9. During character creation, configure scenario-grounded allowed/recommended skills and party fairness first; persist appearance, background, concept, chosen skills, and accepted/rejected ruling before rolling abilities and HP/MP/SAN maxima.",
+    "10. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
   ].join("\n");
 }
 
@@ -177,6 +239,7 @@ export default function trpgGmGuard(pi) {
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
+      "For new characters use creation configure, creation propose, then creation roll; do not bypass world-fit adjudication with character add.",
     ],
     parameters: {
       type: "object",
@@ -206,6 +269,12 @@ export default function trpgGmGuard(pi) {
         turn.contextRoom = operation.contextRoom;
       }
       if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
+      if (operation.characterProposal) {
+        turn.characterProposals.push(parseCharacterProposal(result.stdout));
+      }
+      if (operation.characterGenerated) {
+        turn.characterGenerations.push(parseCharacterGeneration(result.stdout));
+      }
       if (operation.action) {
         turn.actionAdjudications.push(parseActionAdjudication(result.stdout));
         turn.latestActionIndex = operationIndex;
@@ -345,6 +414,8 @@ export default function trpgGmGuard(pi) {
           checkResolved: turn.checkResolved,
           mutationPersisted: turn.mutationPersisted,
           stateChanges: params.stateChanges,
+          characterProposals: turn.characterProposals,
+          characterGenerations: turn.characterGenerations,
           actionAdjudications: turn.actionAdjudications,
           checkReports: turn.checkReports,
         },
@@ -355,6 +426,35 @@ export default function trpgGmGuard(pi) {
   pi.on("message_end", async (event) => {
     if (!active || !turn.finalized || event.message.role !== "assistant") return undefined;
     const blocks = [];
+    const pendingProposals = turn.characterProposals
+      .slice(turn.characterProposalReportsAppended)
+      .filter((proposal) => proposal.decision === "rejected");
+    for (const proposal of pendingProposals) {
+      blocks.push([
+        "**角色提案裁定：不允許**",
+        `- 角色：${proposal.name}（${proposal.characterId}）`,
+        `- 概念：${proposal.concept}`,
+        `- 技能：${proposal.skills.join("、")}`,
+        `- 原因：${proposal.reason}`,
+        `- 依據：${proposal.basis}`,
+      ].join("\n"));
+    }
+    turn.characterProposalReportsAppended = turn.characterProposals.length;
+
+    const pendingGenerations = turn.characterGenerations
+      .slice(turn.characterGenerationReportsAppended);
+    for (const generation of pendingGenerations) {
+      const skillLines = Object.entries(generation.stats).map(([skill, value]) =>
+        `- ${skill}：roll ${generation.skillRolls[skill]} → ${value}`);
+      const resourceLines = ["hp", "mp", "san"].map((resource) =>
+        `- ${resource.toUpperCase()} 上限：roll ${generation.resourceRolls[resource]} → ${generation.maxima[resource]}`);
+      blocks.push([
+        `**角色生成結果：${generation.name}（${generation.characterId}）**`,
+        ...skillLines,
+        ...resourceLines,
+      ].join("\n"));
+    }
+    turn.characterGenerationReportsAppended = turn.characterGenerations.length;
     const latestAction = turn.actionAdjudications.at(-1);
     if (latestAction?.decision === "rejected" && !turn.actionRulingAppended) {
       blocks.push([

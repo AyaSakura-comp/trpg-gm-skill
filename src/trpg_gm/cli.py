@@ -16,6 +16,13 @@ def _json(value: str) -> dict:
     return parsed
 
 
+def _json_list(value: str) -> list[str]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise argparse.ArgumentTypeError("must be a JSON array of strings")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trpg-gm", description="Persistent TRPG GM state CLI")
     parser.add_argument("--db", type=Path, default=Path(".trpg/game.sqlite3"))
@@ -59,6 +66,30 @@ def build_parser() -> argparse.ArgumentParser:
     entity.add_argument("entity_id")
     entity.add_argument("name")
     entity.add_argument("--state", type=_json, required=True)
+
+    creation = commands.add_parser("creation")
+    creation_commands = creation.add_subparsers(dest="action", required=True)
+    creation_configure = creation_commands.add_parser("configure")
+    creation_configure.add_argument("room_id")
+    creation_configure.add_argument("--rules", type=_json, required=True)
+    creation_configure.add_argument("--basis", required=True)
+    creation_show = creation_commands.add_parser("show")
+    creation_show.add_argument("room_id")
+    creation_propose = creation_commands.add_parser("propose")
+    creation_propose.add_argument("room_id")
+    creation_propose.add_argument("character_id")
+    creation_propose.add_argument("name")
+    creation_propose.add_argument("--appearance", required=True)
+    creation_propose.add_argument("--background", required=True)
+    creation_propose.add_argument("--concept", required=True)
+    creation_propose.add_argument("--skills", type=_json_list, required=True)
+    creation_propose.add_argument("--decision", choices=("accepted", "rejected"), required=True)
+    creation_propose.add_argument("--basis", required=True)
+    creation_propose.add_argument("--reason", required=True)
+    creation_roll = creation_commands.add_parser("roll")
+    creation_roll.add_argument("room_id")
+    creation_roll.add_argument("character_id")
+    creation_roll.add_argument("--rolls", type=_json)
 
     action = commands.add_parser("action")
     action_commands = action.add_subparsers(dest="action", required=True)
@@ -117,6 +148,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "entity":
         store.upsert_entity(args.room_id, args.kind, args.entity_id, args.name, args.state)
         result = {"ok": True, "kind": args.kind, "id": args.entity_id}
+    elif args.command == "creation" and args.action == "configure":
+        result = store.configure_character_creation(
+            args.room_id, args.rules, basis=args.basis
+        )
+    elif args.command == "creation" and args.action == "show":
+        result = store.get_character_creation_rules(args.room_id)
+    elif args.command == "creation" and args.action == "propose":
+        result = store.propose_character(
+            args.room_id,
+            args.character_id,
+            args.name,
+            appearance=args.appearance,
+            background=args.background,
+            concept=args.concept,
+            skills=args.skills,
+            decision=args.decision,
+            basis=args.basis,
+            reason=args.reason,
+        )
+    elif args.command == "creation" and args.action == "roll":
+        result = store.roll_character_creation(
+            args.room_id, args.character_id, rolls=args.rolls
+        )
     elif args.command == "action" and args.action == "adjudicate":
         result = store.adjudicate_action(
             args.room_id,

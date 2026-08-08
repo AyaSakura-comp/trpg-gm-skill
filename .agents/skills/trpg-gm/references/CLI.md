@@ -31,7 +31,60 @@ $GM --db "$DB" recap show my-room
 
 `recap save` appends a new snapshot; `recap show` returns the latest one or JSON `null` if none exists. Recaps are player-facing by design. Never place undiscovered clues, NPC secrets, scenario truth, foreshadowing, or GM notes in `summary` or `state`. Read full `context` separately for GM continuity.
 
+## World-aware character creation
+
+Configure one persistent ruleset per room after reading the scenario/canon. The number of required skills is scenario-dependent:
+
+```bash
+$GM --db "$DB" creation configure my-room \
+  --basis 'scenario.md#investigator-creation' \
+  --rules '{
+    "skill_count":3,
+    "allowed_skills":["偵查","聆聽","圖書館使用","說服"],
+    "recommended_skills":["偵查","圖書館使用"],
+    "skill_min":20,
+    "skill_max":80,
+    "resources":{
+      "hp":{"base":8,"die":6,"max_party_difference":2},
+      "mp":{"base":6,"die":6,"max_party_difference":2},
+      "san":{"base":45,"die":30,"max_party_difference":10}
+    }
+  }'
+
+$GM --db "$DB" creation show my-room
+```
+
+`allowed_skills` is the world-compatible choice pool. `recommended_skills` lets the GM offer useful suggestions, but the player may decide any exact `skill_count` unique skills from the allowed pool. A different count or unsupported skill cannot be accepted.
+
+Record appearance, background, concept, chosen skills, and an explicit world-fit ruling:
+
+```bash
+$GM --db "$DB" creation propose my-room alice '艾莉絲' \
+  --appearance '黑髮，穿舊式記者風衣' \
+  --background '地方報社記者' \
+  --concept '追查失蹤案的民間調查者' \
+  --skills '["偵查","圖書館使用","說服"]' \
+  --decision accepted \
+  --basis '劇本允許現代民間調查者，所選技能都在 allowed_skills' \
+  --reason '外觀、背景、概念與技能符合世界觀'
+```
+
+Rejected proposals are also persisted as `character_concept_adjudicated` events. Explain the reason and basis to the player; then ask them to revise the proposal. Only the latest accepted proposal can be rolled.
+
+```bash
+# Secure random rolls:
+$GM --db "$DB" creation roll my-room alice
+
+# Explicit rolls for physical dice, replay, or tests:
+$GM --db "$DB" creation roll my-room alice \
+  --rolls '{"skills":{"偵查":82,"圖書館使用":41,"說服":65},"hp":4,"mp":2,"san":17}'
+```
+
+Each skill rolls d100 and maps linearly into `skill_min..skill_max`. Resource maxima use `base + d(die)`. To keep party members comparable, the final HP/MP/SAN maximum is clamped so its pairwise difference from every existing room character is at most that resource's `max_party_difference`; the original roll and adjusted maximum are both reported and persisted in `character_generated`. Current HP/MP/SAN start at those maxima and cannot later be adjusted above them.
+
 ## Characters
+
+`character add` is retained for importing legacy/pre-generated characters. Normal new characters must use `creation configure` → `creation propose` → `creation roll`.
 
 ```bash
 $GM --db "$DB" character add my-room alice '艾莉絲' \

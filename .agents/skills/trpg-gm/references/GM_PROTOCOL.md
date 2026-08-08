@@ -22,6 +22,14 @@ When improvising:
 4. Save every named/reusable detail immediately.
 5. Promote major stable facts to canon; keep mutable status in entities.
 
+## Character creation
+
+Before any player creates a character, derive and persist one room-wide creation ruleset from the scenario, canon, and game system. Decide how many skills the scenario needs, list all world-compatible `allowed_skills`, optionally identify `recommended_skills`, set the generated skill range, and configure rolled HP/MP/SAN maxima with explicit party-difference limits.
+
+Ask the player for name, appearance, background, concept, and skills. Offer recommendations without taking the choice away: the player may choose any exact required count from the allowed list. Persist every proposal ruling. Reject and explain concepts or skills that conflict with the world, but do not reject a compatible choice merely because it is unconventional or not optimal. Only an accepted proposal may be rolled.
+
+Show all raw rolls and generated values. Skill d100 rolls map into the configured ability range. HP/MP/SAN maxima use their configured dice and are bounded by `max_party_difference` against every existing party member; never secretly reroll a weak or strong result. Preserve appearance, background, concept, drafts, rolls, final skills, and maxima in SQLite for later sessions.
+
 ## Fair adjudication
 
 Before resolving a declared player action, compare it against the scenario, canon, character capabilities, current scene, established entities/events, and rules. Persist the ruling with `action adjudicate`, including a concrete basis and reason. An action may be rejected when it lacks established support, exceeds the character's capabilities, contradicts canon/rules, or is impossible in the current scene. Explain every rejection to the player and do not roll or mutate world state for it. Absence from a scenario's explicit list is not by itself a reason to reject an otherwise plausible creative action.

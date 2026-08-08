@@ -52,9 +52,20 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 - 詢問或確認：room-id、規則系統、劇本檔案路徑（可無）、基調/界線、角色資料。
 - `room create` 建立房間。若沒有劇本，明確說會即興主持，而不是假裝有原作。
 - 新團建立完成後保存第一份 player-safe recap，讓下一個 session 能辨識目前開場狀態。
-- 每位玩家用 `character add` 建立角色，至少包含 HP、MP、SAN；其他能力放在 `--stats` JSON。
+- 一般捏角必須使用下方「持久化捏角流程」；`character add` 只保留給舊角色匯入，不得用它跳過世界觀審核、骰值與隊伍公平限制。
 - 用 entities 建立 `scene`、`npc`、`quest`、`location`、`clue`、`faction`；狀態 JSON 應包含 `status` 與關係/可見性等必要欄位。
 - 將不可任意改寫的真相用 `canon` 固定，來源使用劇本路徑、session 編號或 `improvised:<session>`。
+
+## 持久化捏角流程
+
+1. 讀劇本、世界觀 canon 與規則後，先用 `creation configure` 保存本團捏角規則及來源依據。`skill_count` 是劇本需要的技能數，可以是一個或好幾個；同一團所有角色共用。`allowed_skills` 是符合世界觀的可選技能，`recommended_skills` 是 GM 可向玩家建議的子集合。不要為了配合玩家而偷偷加入違反設定的技能。
+2. 向玩家詢問姓名、外觀、背景與角色概念。技能可以由玩家從 `allowed_skills` 自己決定，也可以先提供 `recommended_skills` 建議；最終技能數必須等於 `skill_count`。
+3. 用 `creation propose` 保存完整提案與 `accepted`/`rejected` 裁定。外觀、背景、概念或技能不符合世界觀時可以拒絕，但必須保存並說明具體原因與依據；合理且符合設定的選擇不可只因不是 GM 首選而拒絕。
+4. 只有接受的最新提案才能執行 `creation roll`。每個技能各擲 d100，再映射至設定的 `skill_min..skill_max`；HP、MP、SAN 上限分別依 `resources` 的 `base + d(die)` 產生。
+5. `max_party_difference` 限制新角色與同團既有角色的 HP／MP／SAN 上限差距。原始骰值超出公平區間時只調整最終上限，不重擲；必須向玩家顯示原始 roll 與調整後數值。現在 HP／MP／SAN 的目前值不得治療到各自上限以上。
+6. `context` 會保存並恢復捏角規則、所有接受／拒絕提案、外觀、背景、概念、技能與生成後角色。Pi Guard 會自動附加被拒絕提案的原因，以及成功捏角的技能骰值和 HP／MP／SAN 上限骰值。
+
+建議預設規則（劇本另有規定時以劇本為準）：技能值範圍 20–80；HP `8+d6` 且隊伍最大差 2；MP `6+d6` 且最大差 2；SAN `45+d30` 且最大差 10。
 
 ## 不可違反
 

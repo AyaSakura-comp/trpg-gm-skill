@@ -390,8 +390,10 @@ Python 程式位於 `src/trpg_gm/`。它不創作故事，也不自行決定 NPC
 提供 agent 可呼叫的命令列介面：
 
 - 建立 room
-- 新增角色
-- 調整 HP／MP／SAN
+- 設定劇本相容的捏角規則與技能數量
+- 保存角色外觀、背景、概念及技能提案的接受／拒絕裁定
+- 擲骰生成技能值與公平約束的 HP／MP／SAN 上限
+- 調整 HP／MP／SAN，但不得超過生成上限
 - 新增或更新 entity
 - 寫入 canon
 - 執行並保存 d100 判定
@@ -406,8 +408,10 @@ Python 程式位於 `src/trpg_gm/`。它不創作故事，也不自行決定 NPC
 負責 SQLite schema 與資料一致性：
 
 - 以 `room_id` 隔離不同遊戲。
-- 保存角色和世界狀態。
-- 將資源變動、entity 更新與判定寫入事件紀錄。
+- 保存角色外觀、背景、概念、捏角規則、提案與世界狀態。
+- 驗證技能數量及 allowed skills，拒絕強行接受不符合世界觀的技能。
+- 保存技能與 HP／MP／SAN 上限的原始骰值，並以 `max_party_difference` 限制同團角色資源差距。
+- 將角色生成、資源變動、entity 更新與判定寫入事件紀錄。
 - 遇到 canon 舊值與新值不同時直接拒絕，防止 agent 靜默吃書。
 - 將 room、角色、canon、entities 與 recent events 組合成每回合 context。
 - 以 append-only snapshots 保存 player-safe recaps，供新 session 回顧舊團。
@@ -480,16 +484,32 @@ $GM --db "$DB" room create miskatonic \
 
 `script_path` 只保存路徑，劇本內容仍由 agent 使用檔案工具讀取，不會複製進 SQLite。
 
-### 2. 建立玩家角色
+### 2. 持久化捏角
+
+GM 先依劇本／canon 設定本團技能數、可選技能、建議技能、能力值範圍與 HP／MP／SAN 公平限制：
 
 ```bash
-$GM --db "$DB" character add miskatonic alice 艾莉絲 \
-  --hp 10 \
-  --mp 8 \
-  --san 55 \
-  --stats '{"力量":45,"聆聽":60,"圖書館使用":70}' \
-  --notes '記者'
+$GM --db "$DB" creation configure miskatonic \
+  --basis 'scenario.md#investigator-creation' \
+  --rules '{"skill_count":3,"allowed_skills":["偵查","聆聽","圖書館使用","說服"],"recommended_skills":["偵查","圖書館使用"],"skill_min":20,"skill_max":80,"resources":{"hp":{"base":8,"die":6,"max_party_difference":2},"mp":{"base":6,"die":6,"max_party_difference":2},"san":{"base":45,"die":30,"max_party_difference":10}}}'
 ```
+
+玩家填寫姓名、外觀、背景與概念，並可接受 GM 建議或自行從 allowed skills 選擇劇本要求的技能數。GM 用 `creation propose` 保存接受／拒絕、原因與設定依據；不符合世界觀時可以拒絕，但不能替玩家選擇。
+
+```bash
+$GM --db "$DB" creation propose miskatonic alice 艾莉絲 \
+  --appearance '黑髮，穿舊式記者風衣' \
+  --background '地方報社記者' \
+  --concept '追查失蹤案的民間調查者' \
+  --skills '["偵查","圖書館使用","說服"]' \
+  --decision accepted \
+  --basis '符合現代調查劇本與 allowed skills' \
+  --reason '外觀、背景、概念與技能符合世界觀'
+
+$GM --db "$DB" creation roll miskatonic alice
+```
+
+技能各擲 d100 並映射到設定範圍；HP／MP／SAN 上限也會擲骰。新角色的最終資源上限會被限制在與每位既有隊友的 `max_party_difference` 內，原始 roll 與調整後結果都會保存和回報。`character add` 僅供舊角色匯入。
 
 玩家角色建立後，agent 不可以自行替角色採取行動。
 
