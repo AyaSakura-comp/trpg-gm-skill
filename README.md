@@ -1,8 +1,9 @@
 # TRPG GM Skill
 
-給 AI agent 使用的持久化 TRPG 主持人系統。它將「主持遊戲的判斷」與「可靠保存遊戲狀態」拆成兩層：
+給 AI agent 使用的持久化 TRPG 主持人系統。它將「主持遊戲的判斷」與「可靠保存遊戲狀態」拆成三層：
 
 - **Skill（Markdown 指令）**負責告訴 agent 如何當 GM、何時讀寫資料、如何避免吃書，以及如何尊重玩家決定。
+- **Pi Extension（JavaScript hooks）**在每個 Pi 回合注入 checklist、追蹤 CLI 操作，並要求 agent 在輸出玩家敘事前呼叫 `trpg_turn_finalize`。
 - **Python + SQLite** 負責執行確定性的操作，例如保存角色、調整 HP／MP／SAN、進行判定、隔離 room，以及拒絕互相衝突的 canon。
 
 因此，故事創作仍由 agent 負責，但已經發生的事不再只存在聊天上下文裡。
@@ -14,6 +15,7 @@
 - Git
 - Python 3.10+
 - Bash（Linux、macOS 或 Windows WSL／Git Bash）
+- Pi Extension 需要可載入 JavaScript extensions 的 Pi Agent；Pi 本身已包含所需 Node.js runtime
 - Agent 必須能讀檔、執行 shell，並對 campaign DB 目錄有寫入權限
 
 這個 Skill 的 Python CLI 位於同一個 Git repository，因此建議保留完整 clone，再讓各 agent 的 skills 目錄 symlink 到 clone 裡的 `.agents/skills/trpg-gm`。不要只複製 `SKILL.md`，否則 `scripts/`、`references/` 和 `src/trpg_gm/` 不會完整存在。
@@ -41,44 +43,69 @@ SKILL_SOURCE="$REPO/.agents/skills/trpg-gm"
 
 Skill symlink 可以共用同一份 Git checkout；之後 `git pull` 即可讓所有 agent 同步更新。
 
-### 2. 安裝到 Pi Agent
+### 2. 安裝到 Pi Agent（Skill + Extension）
 
-Pi 會掃描使用者層級的 `~/.agents/skills/`，也會掃描可信任專案中的 `.agents/skills/`。
-
-#### 全域安裝
-
-```bash
-mkdir -p "$HOME/.agents/skills"
-ln -s "$SKILL_SOURCE" "$HOME/.agents/skills/trpg-gm"
-```
-
-若目標已存在，`ln` 會安全地失敗；先檢查舊版本，不要直接覆蓋：
-
-```bash
-ls -ld "$HOME/.agents/skills/trpg-gm"
-```
-
-重新啟動 Pi，然後使用：
+這個 repository 現在是完整的 Pi package。`package.json` 會同時註冊：
 
 ```text
+.agents/skills/trpg-gm/       # GM Skill
+extensions/trpg-gm-guard.js   # Pi lifecycle hooks
+```
+
+Extension 具有與 Pi 相同的系統權限；安裝前請先檢查原始碼。只 symlink `SKILL.md` 不會安裝 Extension。
+
+#### 從已 clone 的目錄全域安裝
+
+```bash
+pi install "$REPO"
+pi list
+```
+
+Local path package 不會被複製；Pi 直接使用這份 checkout。安裝後重新啟動 Pi，或在已開啟的 session 執行：
+
+```text
+/reload
 /skill:trpg-gm
 ```
 
-也可以讓 Pi 根據 Skill description 自動載入。驗證 discovery 時可明確指定原始 Skill：
+#### 直接從 Git repository 全域安裝
+
+Repository 發布後可省略手動 clone：
 
 ```bash
-pi --skill "$SKILL_SOURCE/SKILL.md" -p '/skill:trpg-gm 我想玩 TRPG'
+pi install https://github.com/<owner>/trpg-gm-skill
+# SSH private repository：
+# pi install git:git@github.com:<owner>/trpg-gm-skill
 ```
+
+Pi 會 clone repository、執行 package install，並依 `package.json` 載入 Skill 與 Extension。
 
 #### 只安裝到某個遊戲 workspace
 
 ```bash
 GAME_DIR=/path/to/my-trpg-workspace
-mkdir -p "$GAME_DIR/.agents/skills"
-ln -s "$SKILL_SOURCE" "$GAME_DIR/.agents/skills/trpg-gm"
+cd "$GAME_DIR"
+pi install -l "$REPO"
 ```
 
-從 `$GAME_DIR` 啟動 Pi 並接受 project trust。這個 repository 本身已包含 `.agents/skills/trpg-gm`，所以直接從 clone 根目錄啟動 Pi 時不需要額外 symlink。
+這會寫入 `$GAME_DIR/.pi/settings.json`。從該 workspace 啟動 Pi 並接受 project trust 後才會載入 package。
+
+#### 不安裝，單次測試
+
+```bash
+pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
+```
+
+#### 確認 Extension 正在運作
+
+使用 `/skill:trpg-gm` 後，每個遊戲回合都會看到 `TRPG GM Guard` checklist；agent 也會取得 `trpg_gm_cli` 與 `trpg_turn_finalize` 工具。Extension 會：
+
+1. 在 `before_agent_start` 注入當回合檢查表。
+2. 透過結構化 `trpg_gm_cli` 執行並追蹤成功的 `context`、`check` 與狀態 mutation；Pi 遊戲回合不再解析任意 bash 字串。
+3. 拒絕 gameplay 回合沒有先讀取 context、沒有交代檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
+4. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
+
+Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Python CLI 寫入 SQLite。
 
 ### 3. 安裝到 OpenAI Codex CLI／IDE
 
@@ -167,9 +194,13 @@ skills:
 
 ### 6. 共用安裝快速版
 
-Pi、Codex 與 Hermes 可以共用 `~/.agents/skills`；Claude Code 另外建立一個 symlink：
+Pi 應安裝完整 package 才會取得 hooks；Codex 與 Hermes 可以共用 `~/.agents/skills`，Claude Code 另外建立 symlink：
 
 ```bash
+# Pi：Skill + Extension
+pi install "$REPO"
+
+# 其他 agents：共用跨平台 Skill（沒有 Pi hooks）
 mkdir -p "$HOME/.agents/skills" "$HOME/.claude/skills"
 ln -s "$SKILL_SOURCE" "$HOME/.agents/skills/trpg-gm"
 ln -s "$SKILL_SOURCE" "$HOME/.claude/skills/trpg-gm"
@@ -183,28 +214,63 @@ ln -s "$SKILL_SOURCE" "$HOME/.claude/skills/trpg-gm"
 最終結構：
 
 ```text
-~/.local/share/trpg-gm-skill/          # 完整 Git clone + Python
-└── .agents/skills/trpg-gm/
+~/.local/share/trpg-gm-skill/          # 完整 Git clone + Python + Pi Extension
+├── .agents/skills/trpg-gm/
+└── extensions/trpg-gm-guard.js
 
-~/.agents/skills/trpg-gm              # Pi + Codex，共用 symlink
-~/.claude/skills/trpg-gm              # Claude Code symlink
+Pi settings                             # 指向完整 local package
+~/.agents/skills/trpg-gm               # Codex + Hermes，共用 symlink
+~/.claude/skills/trpg-gm               # Claude Code symlink
 ~/.hermes/config.yaml                  # Hermes external_dirs 指向 ~/.agents/skills
 ```
 
-### 更新與移除
+### 更新 Extension 與 Skill
 
-更新完整 Git checkout：
+#### Local clone 安裝
+
+Pi 直接讀取 checkout，所以更新同一個 clone 即可：
 
 ```bash
 git -C "$REPO" pull --ff-only
-PYTHONPATH="$REPO/src" python3 -m unittest discover -s "$REPO/tests" -v
+cd "$REPO"
+npm test
 ```
 
-Symlink 不需要重建。更新後重啟 agent；Pi 也可以使用 `/reload`。
+測試通過後，在 Pi 執行：
 
-移除時先刪除各 agent 的 symlink，再刪除 clone。**不要刪除 campaign DB**：遊戲資料應放在遊戲 workspace 的 `.trpg/rooms/`，而不是安裝 repository 裡。
+```text
+/reload
+```
+
+`/reload` 會重新載入 package 的 Skill 與 Extension；symlink 不需要重建。
+
+#### Git URL 安裝
+
+未固定 ref 的 Git package：
 
 ```bash
+pi update --extension https://github.com/<owner>/trpg-gm-skill
+# 或更新全部已安裝 packages：
+pi update --extensions
+```
+
+如果安裝來源包含固定 tag／commit，例如 `@v0.2.0`，一般 update 不會移動到新版本。請明確安裝新 ref：
+
+```bash
+pi install git:github.com/<owner>/trpg-gm-skill@v0.3.0
+```
+
+更新完成後重新啟動 Pi 或執行 `/reload`。可用 `pi list` 確認 package 來源，用 `pi config` 啟用／停用其中的 Skill 或 Extension。
+
+### 移除
+
+先用當初相同的 package source 從 Pi 移除，再處理其他 agents 的 symlink。**不要刪除 campaign DB**：遊戲資料應放在遊戲 workspace 的 `.trpg/rooms/`，而不是安裝 repository 裡。
+
+```bash
+# Local path 安裝：
+pi remove "$REPO"
+# Git URL 安裝則使用：pi remove https://github.com/<owner>/trpg-gm-skill
+
 rm "$HOME/.agents/skills/trpg-gm"
 rm "$HOME/.claude/skills/trpg-gm"
 # 如果使用 Hermes direct symlink：
@@ -214,7 +280,7 @@ rm "${HERMES_HOME:-$HOME/.hermes}/skills/trpg-gm"
 rm -rf "$REPO"
 ```
 
-安裝路徑依據官方文件：[Pi Skills](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md)、[Codex Build skills](https://learn.chatgpt.com/docs/build-skills)、[Claude Code Skills](https://code.claude.com/docs/en/slash-commands)、[Hermes Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)。
+安裝與 hooks 依據官方文件：[Pi Packages](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/packages.md)、[Pi Extensions](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/extensions.md)、[Pi Skills](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md)、[Codex Build skills](https://learn.chatgpt.com/docs/build-skills)、[Claude Code Skills](https://code.claude.com/docs/en/slash-commands)、[Hermes Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)。
 
 ## 系統組成
 
@@ -225,9 +291,12 @@ rm -rf "$REPO"
 AI Agent
    │ 載入 SKILL.md：主持規範、每回合流程、資訊揭露規則
    │
+Pi Extension（Pi 環境）
+   │ 注入 checklist、追蹤成功工具操作、要求 turn finalization
+   │
    ├── 讀劇本檔案：世界觀、場景、NPC 與預寫內容
    │
-   └── 呼叫 scripts/trpg-gm
+   └── Pi：呼叫 trpg_gm_cli；其他 agent：呼叫 scripts/trpg-gm
              │
              ▼
         Python CLI
@@ -281,6 +350,30 @@ Skill 負責：
    - 每次回覆最後把決定權交還玩家，例如「你要怎麼做？」。
 
 更完整的主持規範：`.agents/skills/trpg-gm/references/GM_PROTOCOL.md`。
+
+## Pi Extension 負責什麼
+
+Extension 位於 `extensions/trpg-gm-guard.js`，只在 Pi Agent 中運作；Agent Skills 標準本身沒有 lifecycle hooks，因此 Claude Code、Codex 與 Hermes 載入相同 Skill 時不會取得這一層保護。
+
+Extension 使用 Pi lifecycle API：
+
+- `input`：辨識明確的 `/skill:trpg-gm`、要求 agent 當 GM／主持冒險，以及 TRPG 開團／續團遊戲請求，啟用 session guard；只討論或修改 `trpg-gm` 程式碼與 README 不會啟用。
+- `before_agent_start`：每回合注入 context、狀態保存、秘密資訊及玩家自主權 checklist。
+- `trpg_gm_cli` custom tool：以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens，成功後才記錄 exact room、context、check 與 mutation。這避免 shell quoting、pipe、compound command 或只印出命令文字造成誤判；工具失敗時不會更新 guard 狀態。
+- `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，排入一次 follow-up，讓 agent 補完而不是無限重試。
+- Session custom entry：保存 guard 已啟用狀態，使 `/reload` 或 resume 後仍可恢復。
+
+Extension 另提供 `trpg_turn_finalize` 工具。Agent 必須在所有狀態操作完成後、玩家可見回答之前呼叫；工具會拒絕以下情況：
+
+- `gameplay` 回合沒有成功載入 room context；只有等待玩家提供 room／開團資訊時才能使用 `clarification` 例外。
+- 宣稱保存了狀態，但實際未觀察到成功的 mutation。
+- 執行判定後既未保存後果，也沒有合理的 `noStateChangeReason`。
+- 沒有確認 player-facing 回覆已排除 GM secret。
+- 沒有確認玩家角色的額外決策仍交給玩家。
+
+`trpg_turn_finalize` 的 `turnKind` 通常使用 `gameplay`。若 Skill 正在詢問「新團或舊團」、room-id、劇本或角色等缺少資訊，可使用 `clarification`，並在 `noStateChangeReason` 說明正在等待哪一項玩家輸入；已經擲骰或寫入狀態的回合不能藉此跳過驗證。
+
+這是一個流程 guard，不是安全邊界或完整的故事內容審查器。它無法從自然語言百分之百判斷一條新線索是否漏存，而且 `agent_settled` 發生在模型產生回覆之後：follow-up 可以要求修正，但不能撤回已經串流到前端的文字。秘密資訊仍必須由 Skill 規範與模型遵守；結構化 finalization、SQLite 事件紀錄及人工監督應共同使用。
 
 ## Python 負責什麼
 
@@ -434,6 +527,7 @@ $GM --db "$DB" context miskatonic --events 30
   → 判斷是否需要擲骰
   → 執行判定
   → 寫入資源、NPC、線索或支線變化
+  → Pi：呼叫 trpg_turn_finalize 驗證本回合
   → 描述玩家角色能感知的結果
   → 詢問下一步行動
 ```
@@ -520,7 +614,7 @@ Recap 不可包含未發現線索、NPC secret、劇本真相、伏筆或 GM not
 | 防止 canon 被改寫 | 發現衝突後解釋或詢問 | 拒絕不同值覆寫 |
 | 對話中斷後恢復 | 讀 context，向玩家顯示 recap | 持久保存完整狀態與安全摘要 |
 
-簡單說：**Skill 管主持決策與流程，Python 管可驗證的狀態與規則。**
+簡單說：**Skill 管主持決策，Pi Extension 管每回合流程 guard，Python 管可驗證的狀態與規則。**
 
 ## 快速開始
 
@@ -538,19 +632,32 @@ $GM --db "$DB" character add demo alice 艾莉絲 \
 $GM --db "$DB" context demo
 ```
 
-Pi 在信任此 repo 後會從 `.agents/skills/` 自動發現 Skill。其他支援 Agent Skills 規格的 agent harness 也可以直接載入該目錄。
+Pi 若只信任並開啟此 repo，會從 `.agents/skills/` 發現 Skill，但不會因此自動安裝 package Extension。要同時取得 hooks，請先執行 `pi install "$PWD"`；其他支援 Agent Skills 規格的 agent harness 則可直接載入該 Skill 目錄。
 
 完整 CLI 命令請見 `.agents/skills/trpg-gm/references/CLI.md`。
 
 ## 測試
 
-### Python 單元測試
+### 完整自動測試
+
+```bash
+npm test
+```
+
+這會依序執行：
 
 ```bash
 PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests -v
+node --test tests/test_extension.mjs
 ```
 
-這組測試驗證 SQLite migration、room 隔離、角色資源、canon 衝突、entity merge-upsert、事件紀錄與 d100 判定。
+Python 測試驗證 SQLite migration、room 隔離、角色資源、canon 衝突、entity merge-upsert、事件紀錄與 d100 判定。Node.js 測試驗證 Pi package manifest、guard activation、結構化 `trpg_gm_cli` 執行與失敗處理、exact-room tracking、finalization 拒絕條件及單次 follow-up 行為。
+
+也可先確認 Pi 能載入 Extension module，而不啟動遊戲：
+
+```bash
+pi -e ./extensions/trpg-gm-guard.js --list-models
+```
 
 ### Pi Agent 多 Session 實玩測試
 
@@ -759,13 +866,18 @@ trpg-gm-skill/
 │   │   ├── CLI.md
 │   │   └── GM_PROTOCOL.md
 │   └── scripts/trpg-gm
+├── extensions/
+│   └── trpg-gm-guard.js
 ├── src/trpg_gm/
 │   ├── cli.py
 │   ├── rules.py
 │   └── store.py
 ├── tests/
+│   ├── test_extension.mjs
+│   └── test_*.py
 ├── docs/
 │   └── LUNA_PLAYTEST.md
+├── package.json
 ├── pyproject.toml
 └── README.md
 ```

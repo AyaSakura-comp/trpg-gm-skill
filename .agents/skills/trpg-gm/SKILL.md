@@ -19,7 +19,7 @@ cd <directory-containing-this-SKILL.md>
 
 預設建議每個遊戲 room 使用獨立資料庫：`<workspace>/.trpg/rooms/<room-id>.sqlite3`。`room-id` 必須取自目前 Discord channel/thread、web room 或使用者明確指定的名稱；不確定時先問，絕不能猜到別的 room。
 
-完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。
+完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。若 Pi 環境提供 `trpg_gm_cli`，所有 TRPG 狀態操作都必須改用這個結構化工具，不要使用 bash wrapper：將 DB 路徑傳入 `db`，並將原本 `--db` 之後的每個 CLI token 依序放入 `args`，例如 `{"db":".trpg/rooms/demo.sqlite3","args":["context","demo"]}`。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
 
 ## 遊戲入口：新團或舊團
 
@@ -43,7 +43,8 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 4. **一致性檢查**：以 canon、角色、entities、recent_events 為準。資訊不足時只補最小必要細節並立刻保存；不可悄悄改寫既有事實。
 5. **裁定**：只有結果不確定且失敗有意義時才擲骰。先說明技能、目標值與風險，再執行 `check`；不可事後竄改骰子。
 6. **套用後果**：先用 `character adjust`、`entity`、`canon` 寫入狀態，再敘述確定發生的結果。新增 NPC、線索、場景或支線也必須保存。
-7. **回覆玩家**：保持遊戲內視角，清楚描述可感知資訊；最後問「你要怎麼做？」而不是替玩家選行動。
+7. **Pi 回合驗證**：若環境提供 `trpg_turn_finalize` 工具，所有 CLI 寫入完成後，在獨立的工具回合以 `turnKind=gameplay` 呼叫它；列出已保存的玩家安全變化，確認未洩密且未替玩家決策。若仍在詢問新／舊團、room-id 或缺少的角色設定，可改用 `turnKind=clarification` 並說明等待的玩家輸入；已擲骰或寫入狀態後不得使用此例外。驗證失敗時先補齊狀態，不能直接輸出敘事。其他 agent 沒有此工具時略過工具呼叫，但仍須自行完成同一份檢查。
+8. **回覆玩家**：保持遊戲內視角，清楚描述可感知資訊；最後問「你要怎麼做？」而不是替玩家選行動。
 
 ## 開團流程
 

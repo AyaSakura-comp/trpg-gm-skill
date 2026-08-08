@@ -1,0 +1,23 @@
+{
+  "name": "trpg-gm-skill",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent TRPG GM skill, SQLite CLI, and Pi turn-guard extension",
+  "keywords": [
+    "pi-package",
+    "agent-skill",
+    "trpg"
+  ],
+  "scripts": {
+    "test": "PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests -v && node --test tests/test_extension.mjs"
+  },
+  "pi": {
+    "skills": [
+      "./.agents/skills/trpg-gm"
+    ],
+    "extensions": [
+      "./extensions/trpg-gm-guard.js"
+    ]
+  }
+}
