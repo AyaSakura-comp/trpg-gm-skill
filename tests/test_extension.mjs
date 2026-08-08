@@ -221,6 +221,27 @@ test("development prompts do not activate persistent gameplay reminders", async 
   assert.equal(pi.messages.length, 0);
 });
 
+test("successful CLI help output does not poison room tracking", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runCli(pi, ["check", "--help"]);
+
+  const result = await pi.tools.get("trpg_turn_finalize").execute("help", {
+    turnKind: "gameplay",
+    roomId: "room-a",
+    stateChanges: [],
+    secretsChecked: true,
+    playerAgencyChecked: true,
+  });
+  assert.match(result.content[0].text, /validated/i);
+});
+
 test("failed structured CLI calls do not satisfy context tracking", async () => {
   const pi = createFakePi();
   trpgGuard(pi);

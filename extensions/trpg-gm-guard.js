@@ -9,6 +9,9 @@ export function shouldActivateFromText(text) {
 }
 
 function classifyCliArgs(args) {
+  if (args.includes("--help") || args.includes("-h")) {
+    return { contextRoom: null, operationRoom: null, check: false, mutation: false };
+  }
   const [command, actionOrRoom, maybeRoom] = args;
   if (command === "context") return { contextRoom: actionOrRoom, operationRoom: null, check: false, mutation: false };
   if (command === "check") return { contextRoom: null, operationRoom: actionOrRoom, check: true, mutation: false };
