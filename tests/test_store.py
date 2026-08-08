@@ -105,6 +105,33 @@ class GameStoreTests(unittest.TestCase):
             self.assertEqual(GameStore(db).get_latest_recap("room-a"), second)
             self.assertEqual(store.list_events("room-a")[-1]["kind"], "recap_saved")
 
+    def test_action_adjudication_is_persisted_with_basis_and_rejection_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.sqlite3")
+            store.create_room("room-a", "coc7", script_path="scenario.md")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+
+            ruling = store.adjudicate_action(
+                "room-a",
+                "alice",
+                "宣稱自己有翅膀並飛過鎖門",
+                decision="rejected",
+                basis="角色卡與劇本均未建立飛行能力",
+                reason="艾莉絲是普通人，沒有翅膀或其他飛行手段",
+            )
+
+            self.assertEqual(ruling["decision"], "rejected")
+            self.assertEqual(ruling["character_id"], "alice")
+            event = store.list_events("room-a")[-1]
+            self.assertEqual(event["kind"], "action_adjudicated")
+            self.assertEqual(event["payload"], ruling)
+
+            with self.assertRaisesRegex(ValueError, "reason"):
+                store.adjudicate_action(
+                    "room-a", "alice", "穿牆", decision="rejected",
+                    basis="劇本未建立穿牆能力", reason="",
+                )
+
     def test_record_check_uses_character_stat_and_logs_result(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.sqlite3")

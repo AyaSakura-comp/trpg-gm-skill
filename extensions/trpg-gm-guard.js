@@ -38,30 +38,57 @@ function formatCheckReport(check) {
   return `- ${check.characterId} 的${check.stat}：${label}（${check.degree}，roll ${check.roll}，目標 ${check.target}）`;
 }
 
+function parseActionAdjudication(stdout) {
+  let value;
+  try {
+    value = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`Successful action adjudication returned invalid JSON: ${error.message}`);
+  }
+  const required = ["character_id", "action", "decision", "basis", "reason"];
+  const missing = required.filter((key) => !String(value?.[key] ?? "").trim());
+  if (missing.length > 0) {
+    throw new Error(`Successful action adjudication omitted fields: ${missing.join(", ")}.`);
+  }
+  if (!["accepted", "rejected"].includes(value.decision)) {
+    throw new Error(`Unknown action decision: ${value.decision}.`);
+  }
+  return {
+    characterId: String(value.character_id),
+    action: String(value.action),
+    decision: String(value.decision),
+    basis: String(value.basis),
+    reason: String(value.reason),
+  };
+}
+
 export function shouldActivateFromText(text) {
   return ACTIVATION_PATTERN.test(text ?? "");
 }
 
 function classifyCliArgs(args) {
   if (args.includes("--help") || args.includes("-h")) {
-    return { contextRoom: null, operationRoom: null, check: false, mutation: false };
+    return { contextRoom: null, operationRoom: null, action: false, check: false, mutation: false };
   }
   const [command, actionOrRoom, maybeRoom] = args;
-  if (command === "context") return { contextRoom: actionOrRoom, operationRoom: null, check: false, mutation: false };
-  if (command === "check") return { contextRoom: null, operationRoom: actionOrRoom, check: true, mutation: false };
+  if (command === "context") return { contextRoom: actionOrRoom, operationRoom: null, action: false, check: false, mutation: false };
+  if (command === "action" && actionOrRoom === "adjudicate") {
+    return { contextRoom: null, operationRoom: maybeRoom, action: true, check: false, mutation: false };
+  }
+  if (command === "check") return { contextRoom: null, operationRoom: actionOrRoom, action: false, check: true, mutation: false };
   if (["canon", "entity"].includes(command)) {
-    return { contextRoom: null, operationRoom: actionOrRoom, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: actionOrRoom, action: false, check: false, mutation: true };
   }
   if (command === "room" && actionOrRoom === "create") {
-    return { contextRoom: null, operationRoom: maybeRoom, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: maybeRoom, action: false, check: false, mutation: true };
   }
   if (command === "character" && ["add", "adjust"].includes(actionOrRoom)) {
-    return { contextRoom: null, operationRoom: maybeRoom, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: maybeRoom, action: false, check: false, mutation: true };
   }
   if (command === "recap" && actionOrRoom === "save") {
-    return { contextRoom: null, operationRoom: maybeRoom, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: maybeRoom, action: false, check: false, mutation: true };
   }
-  return { contextRoom: null, operationRoom: null, check: false, mutation: false };
+  return { contextRoom: null, operationRoom: null, action: false, check: false, mutation: false };
 }
 
 function freshTurn() {
@@ -69,6 +96,12 @@ function freshTurn() {
     contextLoaded: false,
     contextRoom: null,
     operationRooms: new Set(),
+    operationIndex: 0,
+    latestActionIndex: null,
+    checkOperationIndices: [],
+    mutationOperationIndices: [],
+    actionAdjudications: [],
+    actionRulingAppended: false,
     checkResolved: false,
     checkReports: [],
     checkReportAppended: false,
@@ -88,7 +121,8 @@ function checklist() {
     "5. After all state commands finish, call trpg_turn_finalize in a separate tool round before the final player-facing answer.",
     "6. Use turnKind=clarification only when you must ask for a missing room/setup choice before gameplay; otherwise use gameplay.",
     "7. If a check caused no persistent change, explain why in noStateChangeReason; never use that field to avoid saving a discovered clue.",
-    "8. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
+    "8. Before resolving a declared player action, adjudicate it with trpg_gm_cli action adjudicate against the script, canon, rules, and established state. Reject unsupported or impossible actions with a concrete basis and reason; do not roll or mutate state for a rejected action.",
+    "9. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
   ].join("\n");
 }
 
@@ -139,7 +173,7 @@ export default function trpgGmGuard(pi) {
   pi.registerTool({
     name: "trpg_gm_cli",
     label: "TRPG GM CLI",
-    description: "Run the repository's persistent TRPG CLI with structured arguments. In Pi gameplay, use this instead of bash so the guard can verify each successful room operation. Pass CLI tokens after --db as args, for example [\"context\",\"room-a\"] or [\"entity\",\"room-a\",\"clue\",\"c1\",\"線索\",\"--state\",\"{\\\"status\\\":\\\"discovered\\\"}\"].",
+    description: "Run the repository's persistent TRPG CLI with structured arguments. In Pi gameplay, use this instead of bash so the guard can verify each successful room operation. Before resolving a player's in-world action, call action adjudicate with accepted/rejected, basis, and reason. Pass CLI tokens after --db as args, for example [\"context\",\"room-a\"] or [\"action\",\"adjudicate\",\"room-a\",\"pc\",\"調查門縫\",\"--decision\",\"accepted\",\"--basis\",\"目前場景允許接近門口\",\"--reason\",\"角色具備一般調查能力\"].",
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
@@ -166,15 +200,24 @@ export default function trpgGmGuard(pi) {
       }
       activate();
       const operation = classifyCliArgs(params.args);
+      const operationIndex = ++turn.operationIndex;
       if (operation.contextRoom) {
         turn.contextLoaded = true;
         turn.contextRoom = operation.contextRoom;
       }
       if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
+      if (operation.action) {
+        turn.actionAdjudications.push(parseActionAdjudication(result.stdout));
+        turn.latestActionIndex = operationIndex;
+        turn.actionRulingAppended = false;
+      }
       if (operation.check) {
         turn.checkReports.push(parseCheckReport(result.stdout));
+        turn.checkOperationIndices.push(operationIndex);
+        turn.checkReportAppended = false;
         turn.checkResolved = true;
       }
+      if (operation.mutation) turn.mutationOperationIndices.push(operationIndex);
       turn.mutationPersisted ||= operation.mutation;
       turn.finalized = false;
       return {
@@ -195,7 +238,7 @@ export default function trpgGmGuard(pi) {
     parameters: {
       type: "object",
       additionalProperties: false,
-      required: ["turnKind", "roomId", "stateChanges", "secretsChecked", "playerAgencyChecked"],
+      required: ["turnKind", "roomId", "playerActionStatus", "stateChanges", "secretsChecked", "playerAgencyChecked"],
       properties: {
         turnKind: {
           type: "string",
@@ -203,6 +246,15 @@ export default function trpgGmGuard(pi) {
           description: "Use clarification only while asking the player for missing room or setup information",
         },
         roomId: { type: "string", description: "Exact room id, or an empty string when clarification is required" },
+        playerActionStatus: {
+          type: "string",
+          enum: ["accepted", "rejected", "not_applicable"],
+          description: "Accepted/rejected must match a persisted action adjudication; use not_applicable only when the player declared no in-world action",
+        },
+        noPlayerActionReason: {
+          type: "string",
+          description: "Required with playerActionStatus=not_applicable; explain why this turn contains no declared player action",
+        },
         stateChanges: {
           type: "array",
           items: { type: "string" },
@@ -225,7 +277,13 @@ export default function trpgGmGuard(pi) {
         throw new Error("Confirm that the response does not make additional player-character decisions.");
       }
       if (params.turnKind === "clarification") {
-        if (turn.checkResolved || turn.mutationPersisted || params.stateChanges.length > 0) {
+        if (params.playerActionStatus !== "not_applicable") {
+          throw new Error("Clarification turns cannot accept or reject an in-world player action.");
+        }
+        if (!params.noPlayerActionReason?.trim()) {
+          throw new Error("Clarification finalization requires noPlayerActionReason.");
+        }
+        if (turn.actionAdjudications.length > 0 || turn.checkResolved || turn.mutationPersisted || params.stateChanges.length > 0) {
           throw new Error("A turn with checks or persisted changes must finalize as gameplay, not clarification.");
         }
         if (!params.noStateChangeReason?.trim()) {
@@ -244,6 +302,33 @@ export default function trpgGmGuard(pi) {
       if (wrongOperationRooms.length > 0) {
         throw new Error(`TRPG turn mixed room ${params.roomId} with operations for: ${wrongOperationRooms.join(", ")}.`);
       }
+      const latestAction = turn.actionAdjudications.at(-1);
+      if (params.playerActionStatus === "not_applicable") {
+        if (latestAction) {
+          throw new Error("A persisted player action adjudication exists, so playerActionStatus cannot be not_applicable.");
+        }
+        if (!params.noPlayerActionReason?.trim()) {
+          throw new Error("playerActionStatus=not_applicable requires noPlayerActionReason.");
+        }
+        if (turn.checkResolved) {
+          throw new Error("A resolved check requires an accepted, persisted player action adjudication.");
+        }
+      } else {
+        if (!latestAction) {
+          throw new Error("Player action is missing a persisted action adjudication; run action adjudicate before resolving it.");
+        }
+        if (latestAction.decision !== params.playerActionStatus) {
+          throw new Error(`Finalized player action status ${params.playerActionStatus} does not match persisted adjudication ${latestAction.decision}.`);
+        }
+        const earlierResolution = [...turn.checkOperationIndices, ...turn.mutationOperationIndices]
+          .some((index) => index < turn.latestActionIndex);
+        if (latestAction.decision === "accepted" && earlierResolution) {
+          throw new Error("Accept and persist the player action before any check or world-state mutation; a later adjudication cannot authorize earlier resolution.");
+        }
+        if (latestAction.decision === "rejected" && (turn.checkResolved || turn.mutationPersisted)) {
+          throw new Error("A rejected player action must not produce a check or persistent world-state mutation.");
+        }
+      }
       if (params.stateChanges.length > 0 && !turn.mutationPersisted) {
         throw new Error("TRPG turn declares a state change but no successful state mutation was observed; save it before finalizing.");
       }
@@ -260,6 +345,7 @@ export default function trpgGmGuard(pi) {
           checkResolved: turn.checkResolved,
           mutationPersisted: turn.mutationPersisted,
           stateChanges: params.stateChanges,
+          actionAdjudications: turn.actionAdjudications,
           checkReports: turn.checkReports,
         },
       };
@@ -267,15 +353,28 @@ export default function trpgGmGuard(pi) {
   });
 
   pi.on("message_end", async (event) => {
-    if (!active || !turn.finalized || turn.checkReportAppended) return undefined;
-    if (event.message.role !== "assistant" || turn.checkReports.length === 0) return undefined;
+    if (!active || !turn.finalized || event.message.role !== "assistant") return undefined;
+    const blocks = [];
+    const latestAction = turn.actionAdjudications.at(-1);
+    if (latestAction?.decision === "rejected" && !turn.actionRulingAppended) {
+      blocks.push([
+        "**行動裁定：不允許**",
+        `- 行動：${latestAction.action}`,
+        `- 原因：${latestAction.reason}`,
+        `- 依據：${latestAction.basis}`,
+      ].join("\n"));
+      turn.actionRulingAppended = true;
+    }
+    if (turn.checkReports.length > 0 && !turn.checkReportAppended) {
+      blocks.push(`**判定結果**\n${turn.checkReports.map(formatCheckReport).join("\n")}`);
+      turn.checkReportAppended = true;
+    }
+    if (blocks.length === 0) return undefined;
 
-    const block = `**判定結果**\n${turn.checkReports.map(formatCheckReport).join("\n")}`;
     const content = Array.isArray(event.message.content)
       ? [...event.message.content]
       : [{ type: "text", text: String(event.message.content ?? "") }];
-    content.push({ type: "text", text: `\n\n${block}` });
-    turn.checkReportAppended = true;
+    content.push({ type: "text", text: `\n\n${blocks.join("\n\n")}` });
     return { message: { ...event.message, content } };
   });
 

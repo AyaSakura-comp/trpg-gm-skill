@@ -196,6 +196,37 @@ class GameStore:
         recap["state"] = json.loads(recap.pop("state_json"))
         return recap
 
+    def adjudicate_action(
+        self,
+        room_id: str,
+        character_id: str,
+        action: str,
+        *,
+        decision: str,
+        basis: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if decision not in {"accepted", "rejected"}:
+            raise ValueError("decision must be accepted or rejected")
+        if not action.strip():
+            raise ValueError("action must not be empty")
+        if not basis.strip():
+            raise ValueError("basis must explain the scenario, canon, rules, or established state")
+        if not reason.strip():
+            raise ValueError("reason must explain why the action is accepted or rejected")
+        if self.get_character(room_id, character_id) is None:
+            raise KeyError(f"unknown character: {room_id}/{character_id}")
+        result = {
+            "character_id": character_id,
+            "action": action.strip(),
+            "decision": decision,
+            "basis": basis.strip(),
+            "reason": reason.strip(),
+        }
+        with self._connect() as db:
+            self._append_event(db, room_id, "action_adjudicated", result)
+        return result
+
     def record_check(
         self, room_id: str, character_id: str, stat: str, *, roll: int
     ) -> dict[str, Any]:

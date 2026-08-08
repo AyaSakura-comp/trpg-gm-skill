@@ -44,6 +44,28 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["id"], "demo")
 
+    def test_action_adjudicate_emits_persisted_ruling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "game.sqlite3")
+            with redirect_stdout(StringIO()):
+                main(["--db", db, "room", "create", "demo", "--system", "coc7"])
+                main([
+                    "--db", db, "character", "add", "demo", "alice", "艾莉絲",
+                    "--hp", "10", "--mp", "8", "--san", "55",
+                ])
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main([
+                    "--db", db, "action", "adjudicate", "demo", "alice", "飛過鎖門",
+                    "--decision", "rejected",
+                    "--basis", "角色卡與劇本未建立飛行能力",
+                    "--reason", "角色沒有翅膀或其他飛行手段",
+                ]), 0)
+
+            ruling = json.loads(output.getvalue())
+            self.assertEqual(ruling["decision"], "rejected")
+            self.assertEqual(ruling["action"], "飛過鎖門")
+
     def test_recap_save_and_show_emit_latest_player_safe_recap(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "game.sqlite3")

@@ -101,9 +101,10 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 使用 `/skill:trpg-gm` 後，每個遊戲回合都會看到 `TRPG GM Guard` checklist；agent 也會取得 `trpg_gm_cli` 與 `trpg_turn_finalize` 工具。Extension 會：
 
 1. 在 `before_agent_start` 注入當回合檢查表。
-2. 透過結構化 `trpg_gm_cli` 執行並追蹤成功的 `context`、`check` 與狀態 mutation；Pi 遊戲回合不再解析任意 bash 字串。
-3. 拒絕 gameplay 回合沒有先讀取 context、沒有交代檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
-4. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
+2. 透過結構化 `trpg_gm_cli` 執行並追蹤成功的 `context`、`action adjudicate`、`check` 與狀態 mutation；Pi 遊戲回合不再解析任意 bash 字串。
+3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
+4. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
+5. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
 
 Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Python CLI 寫入 SQLite。
 
@@ -326,7 +327,8 @@ Skill 負責：
    - 先確認目前的 room。
    - 在敘事前讀取 room context。
    - 檢查劇本、canon、角色與最近事件。
-   - 必要時執行判定。
+   - 使用 `action adjudicate` 保存玩家行動是否符合設定，以及具體依據與原因。
+   - 只有接受的行動才可在必要時執行判定。
    - 先保存確定發生的狀態變化，再描述結果。
 
 3. **劇本與即興處理**
@@ -340,7 +342,9 @@ Skill 負責：
    - 不洩漏尚未發現的線索、NPC 祕密或劇本幕後內容。
 
 5. **裁定原則**
-   - 只有行動可行、結果不確定，而且失敗有意義時才擲骰。
+   - 可以拒絕缺乏設定依據、超出角色能力、違反 canon／規則或在目前場景不可能的行動，但必須保存並向玩家說明具體原因。
+   - 劇本沒有逐字列出的合理創意行動不能只因「沒寫」而拒絕。
+   - 只有行動已接受、結果不確定，而且失敗有意義時才擲骰。
    - 擲骰前告知能力、目標值與可見風險。
    - 不因想推劇情而修改骰子或讓唯一線索永久消失。
 
@@ -359,15 +363,17 @@ Extension 使用 Pi lifecycle API：
 
 - `input`：辨識明確的 `/skill:trpg-gm`、要求 agent 當 GM／主持冒險，以及 TRPG 開團／續團遊戲請求，啟用 session guard；只討論或修改 `trpg-gm` 程式碼與 README 不會啟用。
 - `before_agent_start`：每回合注入 context、狀態保存、秘密資訊及玩家自主權 checklist。
-- `trpg_gm_cli` custom tool：以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens，成功後才記錄 exact room、context、check 與 mutation。這避免 shell quoting、pipe、compound command 或只印出命令文字造成誤判；工具失敗時不會更新 guard 狀態。
+- `trpg_gm_cli` custom tool：以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens，成功後才記錄 exact room、context、玩家行動裁定、check 與 mutation。這避免 shell quoting、pipe、compound command 或只印出命令文字造成誤判；工具失敗時不會更新 guard 狀態。
 - `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，排入一次 follow-up，讓 agent 補完而不是無限重試。
 - Session custom entry：保存 guard 已啟用狀態，使 `/reload` 或 resume 後仍可恢復。
 
 Extension 另提供 `trpg_turn_finalize` 工具。Agent 必須在所有狀態操作完成後、玩家可見回答之前呼叫；工具會拒絕以下情況：
 
 - `gameplay` 回合沒有成功載入 room context；只有等待玩家提供 room／開團資訊時才能使用 `clarification` 例外。
+- `playerActionStatus` 宣稱接受／拒絕，但沒有對應的持久化 `action adjudicate` 事件，或宣稱無玩家行動卻沒有 `noPlayerActionReason`。
+- 被拒絕的玩家行動仍執行了判定或世界狀態 mutation。
 - 宣稱保存了狀態，但實際未觀察到成功的 mutation。
-- 執行判定後既未保存後果，也沒有合理的 `noStateChangeReason`。
+- 執行判定後既未保存後果，也沒有合理的 `noStateChangeReason`，或判定之前沒有已接受的行動裁定。
 - 沒有確認 player-facing 回覆已排除 GM secret。
 - 沒有確認玩家角色的額外決策仍交給玩家。
 
@@ -524,7 +530,9 @@ $GM --db "$DB" context miskatonic --events 30
   → 載入 context
   → 讀取相關劇本段落
   → 檢查角色是否能執行
-  → 判斷是否需要擲骰
+  → action adjudicate 保存接受／拒絕、依據與原因
+  → 若拒絕：不擲骰、不改狀態，向玩家說明原因
+  → 若接受：判斷是否需要擲骰
   → 執行判定
   → 寫入資源、NPC、線索或支線變化
   → Pi：呼叫 trpg_turn_finalize 驗證本回合
@@ -532,7 +540,18 @@ $GM --db "$DB" context miskatonic --events 30
   → 詢問下一步行動
 ```
 
-### 5. 需要判定時
+### 5. 先裁定玩家行動
+
+```bash
+$GM --db "$DB" action adjudicate miskatonic alice '展開翅膀飛過鎖門' \
+  --decision rejected \
+  --basis '角色卡、canon 與劇本均未建立飛行能力' \
+  --reason '角色沒有翅膀或其他飛行手段'
+```
+
+接受與拒絕都會保存為 `action_adjudicated` 事件。拒絕必須說明原因與設定依據，而且不能接著擲骰或寫入該行動的世界後果。
+
+### 6. 需要判定時
 
 由程式擲 d100 並保存結果：
 
@@ -548,7 +567,7 @@ $GM --db "$DB" check miskatonic alice 聆聽 --roll 20
 
 Agent 必須接受記錄下來的結果，不可以因劇情需要重新擲骰。
 
-### 6. 套用遊戲後果
+### 7. 套用遊戲後果
 
 例如失去 SAN：
 

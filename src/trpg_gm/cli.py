@@ -60,6 +60,16 @@ def build_parser() -> argparse.ArgumentParser:
     entity.add_argument("name")
     entity.add_argument("--state", type=_json, required=True)
 
+    action = commands.add_parser("action")
+    action_commands = action.add_subparsers(dest="action", required=True)
+    adjudicate = action_commands.add_parser("adjudicate")
+    adjudicate.add_argument("room_id")
+    adjudicate.add_argument("character_id")
+    adjudicate.add_argument("player_action")
+    adjudicate.add_argument("--decision", choices=("accepted", "rejected"), required=True)
+    adjudicate.add_argument("--basis", required=True)
+    adjudicate.add_argument("--reason", required=True)
+
     check = commands.add_parser("check")
     check.add_argument("room_id")
     check.add_argument("character_id")
@@ -107,6 +117,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "entity":
         store.upsert_entity(args.room_id, args.kind, args.entity_id, args.name, args.state)
         result = {"ok": True, "kind": args.kind, "id": args.entity_id}
+    elif args.command == "action" and args.action == "adjudicate":
+        result = store.adjudicate_action(
+            args.room_id,
+            args.character_id,
+            args.player_action,
+            decision=args.decision,
+            basis=args.basis,
+            reason=args.reason,
+        )
     elif args.command == "check":
         roll = args.roll if args.roll is not None else random.SystemRandom().randint(1, 100)
         result = store.record_check(args.room_id, args.character_id, args.stat, roll=roll)

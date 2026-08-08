@@ -44,6 +44,26 @@ $GM --db "$DB" character adjust my-room alice mp -2 --reason '施放守護術'
 
 Resource names are exactly `hp`, `mp`, and `san`. Delta may be positive or negative. Always provide an in-world reason.
 
+## Player action adjudication
+
+Every declared in-world player action must be adjudicated before a check or world-state mutation:
+
+```bash
+# Accept a plausible action supported by the current scene:
+$GM --db "$DB" action adjudicate my-room alice '調查門縫' \
+  --decision accepted \
+  --basis 'scene:clinic-door permits close inspection; character can reach the door' \
+  --reason '這是目前位置與一般角色能力允許的調查行動'
+
+# Reject an impossible or setting-breaking action:
+$GM --db "$DB" action adjudicate my-room alice '展開翅膀飛過鎖門' \
+  --decision rejected \
+  --basis '角色卡、canon 與劇本均未建立翅膀或飛行能力' \
+  --reason '艾莉絲是普通人，目前也沒有任何可用的飛行手段'
+```
+
+The command validates the room character, requires non-empty `basis` and `reason`, and persists an `action_adjudicated` event. `decision` is exactly `accepted` or `rejected`. A rejected action must be explained to the player and must not trigger a check or world-state mutation. Do not reject a plausible creative action merely because the script does not enumerate it word-for-word; reject actions that lack established support, exceed character capabilities, contradict canon/rules, or are impossible in the current scene.
+
 ## Checks
 
 ```bash

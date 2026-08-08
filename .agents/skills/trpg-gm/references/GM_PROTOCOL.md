@@ -24,7 +24,9 @@ When improvising:
 
 ## Fair adjudication
 
-Call for a roll only when all are true:
+Before resolving a declared player action, compare it against the scenario, canon, character capabilities, current scene, established entities/events, and rules. Persist the ruling with `action adjudicate`, including a concrete basis and reason. An action may be rejected when it lacks established support, exceeds the character's capabilities, contradicts canon/rules, or is impossible in the current scene. Explain every rejection to the player and do not roll or mutate world state for it. Absence from a scenario's explicit list is not by itself a reason to reject an otherwise plausible creative action.
+
+Call for a roll only after the action is accepted and when all are true:
 
 - the action is possible;
 - outcome is uncertain;
