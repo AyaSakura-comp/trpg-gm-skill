@@ -88,6 +88,37 @@ class CliTests(unittest.TestCase):
             self.assertEqual(character["max_hp"], 9)
             self.assertEqual(character["appearance"], "黑髮記者")
 
+    def test_guardrail_cli_persists_rules_and_forces_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "game.sqlite3")
+            with redirect_stdout(StringIO()):
+                main(["--db", db, "room", "create", "demo", "--system", "coc7"])
+                main([
+                    "--db", db, "character", "add", "demo", "alice", "艾莉絲",
+                    "--hp", "10", "--mp", "8", "--san", "55",
+                ])
+                main([
+                    "--db", db, "guardrail", "add", "demo", "no-magic",
+                    "--scopes", '["character","action"]',
+                    "--statement", "玩家角色不得施法或瞬間移動。",
+                    "--terms", '["施法","瞬間移動"]',
+                    "--source", "scenario.md#limits",
+                ])
+            output = StringIO()
+            with redirect_stdout(output):
+                main([
+                    "--db", db, "action", "adjudicate", "demo", "alice", "施法打開門",
+                    "--decision", "accepted", "--basis", "玩家要求", "--reason", "接受",
+                ])
+            ruling = json.loads(output.getvalue())
+            self.assertEqual(ruling["decision"], "rejected")
+            self.assertEqual(ruling["enforced_guardrails"], ["no-magic"])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                main(["--db", db, "guardrail", "list", "demo"])
+            self.assertEqual(json.loads(output.getvalue())[0]["id"], "no-magic")
+
     def test_action_adjudicate_emits_persisted_ruling(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "game.sqlite3")

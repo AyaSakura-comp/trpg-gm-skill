@@ -91,6 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
     creation_roll.add_argument("character_id")
     creation_roll.add_argument("--rolls", type=_json)
 
+    guardrail = commands.add_parser("guardrail")
+    guardrail_commands = guardrail.add_subparsers(dest="action", required=True)
+    guardrail_add = guardrail_commands.add_parser("add")
+    guardrail_add.add_argument("room_id")
+    guardrail_add.add_argument("guardrail_id")
+    guardrail_add.add_argument("--scopes", type=_json_list, required=True)
+    guardrail_add.add_argument("--statement", required=True)
+    guardrail_add.add_argument("--terms", type=_json_list, required=True)
+    guardrail_add.add_argument("--source", required=True)
+    guardrail_list = guardrail_commands.add_parser("list")
+    guardrail_list.add_argument("room_id")
+
     action = commands.add_parser("action")
     action_commands = action.add_subparsers(dest="action", required=True)
     adjudicate = action_commands.add_parser("adjudicate")
@@ -171,6 +183,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = store.roll_character_creation(
             args.room_id, args.character_id, rolls=args.rolls
         )
+    elif args.command == "guardrail" and args.action == "add":
+        result = store.add_guardrail(
+            args.room_id,
+            args.guardrail_id,
+            scopes=args.scopes,
+            statement=args.statement,
+            forbidden_terms=args.terms,
+            source=args.source,
+        )
+    elif args.command == "guardrail" and args.action == "list":
+        result = store.list_guardrails(args.room_id)
     elif args.command == "action" and args.action == "adjudicate":
         result = store.adjudicate_action(
             args.room_id,

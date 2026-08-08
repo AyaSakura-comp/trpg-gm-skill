@@ -4,7 +4,7 @@
 
 - **Skill（Markdown 指令）**負責告訴 agent 如何當 GM、何時讀寫資料、如何避免吃書，以及如何尊重玩家決定。
 - **Pi Extension（JavaScript hooks）**在每個 Pi 回合注入 checklist、追蹤 CLI 操作，並要求 agent 在輸出玩家敘事前呼叫 `trpg_turn_finalize`。
-- **Python + SQLite** 負責執行確定性的操作，例如保存角色、調整 HP／MP／SAN、進行判定、隔離 room，以及拒絕互相衝突的 canon。
+- **Python + SQLite** 負責執行確定性的操作，例如保存角色、調整 HP／MP／SAN、進行判定、隔離 room、拒絕互相衝突的 canon，以及用不可覆寫的劇本 guardrails 強制攔截已知違規角色概念與行動。
 
 因此，故事創作仍由 agent 負責，但已經發生的事不再只存在聊天上下文裡。
 
@@ -101,8 +101,8 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 使用 `/skill:trpg-gm` 後，每個遊戲回合都會看到 `TRPG GM Guard` checklist；agent 也會取得 `trpg_gm_cli` 與 `trpg_turn_finalize` 工具。Extension 會：
 
 1. 在 `before_agent_start` 注入當回合檢查表。
-2. 透過結構化 `trpg_gm_cli` 執行並追蹤成功的 `context`、`action adjudicate`、`check` 與狀態 mutation；Pi 遊戲回合不再解析任意 bash 字串。
-3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
+2. 透過結構化 `trpg_gm_cli` 執行並追蹤成功的 `context`、`guardrail add`、`action adjudicate`、`check` 與狀態 mutation；Pi 遊戲回合不再解析任意 bash 字串。
+3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；DB guardrail 命中時會把錯誤的 `accepted` 強制改成 `rejected`。被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
 4. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
 5. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
 
@@ -690,7 +690,7 @@ PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests -
 node --test tests/test_extension.mjs
 ```
 
-Python 測試驗證 SQLite migration、room 隔離、角色資源、canon 衝突、entity merge-upsert、事件紀錄與 d100 判定。Node.js 測試驗證 Pi package manifest、guard activation、結構化 `trpg_gm_cli` 執行與失敗處理、exact-room tracking、finalization 拒絕條件及單次 follow-up 行為。
+Python 測試驗證 SQLite migration、room 隔離、角色資源、canon 衝突、immutable guardrails、強制拒絕、entity merge-upsert、事件紀錄與 d100 判定。Node.js 測試驗證 Pi package manifest、guard activation、結構化 `trpg_gm_cli` 執行與失敗處理、option-order-safe exact-room tracking、未 finalization 回覆攔截、finalization 拒絕條件及單次 follow-up 行為。
 
 也可先確認 Pi 能載入 Extension module，而不啟動遊戲：
 
@@ -886,7 +886,7 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 - Session 收尾保存 player-safe recap；舊團入口顯示 recap，而不是完整私密 context。
 - 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
 
-本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。
+本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。使用 production Qwen MTP 與三名對抗玩家驗證禁止條款、元敘事攻擊及秘密保護的紀錄見 [`docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md)。
 
 ## 目前邊界
 
@@ -915,7 +915,8 @@ trpg-gm-skill/
 │   ├── test_extension.mjs
 │   └── test_*.py
 ├── docs/
-│   └── LUNA_PLAYTEST.md
+│   ├── LUNA_PLAYTEST.md
+│   └── QWEN_MTP_GUARDRAIL_PLAYTEST.md
 ├── package.json
 ├── pyproject.toml
 └── README.md

@@ -40,8 +40,8 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 1. **辨識 room**：確認 room-id 與 DB 路徑。不要混用其他房間。
 2. **載入狀態**：每次回覆遊戲內容前必須執行 `context <room-id>`。
 3. **處理劇本**：讀取 `room.script_path`。有路徑但檔案不存在時停止遊戲並請玩家修正。沒有路徑時，先提醒可提供劇本；若玩家要直接開始，就即興建立 premise、主要衝突與初始場景，並以 `canon`/`entity` 儲存。
-4. **一致性檢查**：以劇本、canon、角色卡、entities、recent_events 與規則為準。資訊不足時只補最小必要細節並立刻保存；不可悄悄改寫既有事實。
-5. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。
+4. **一致性檢查**：以劇本、canon、角色卡、entities、recent_events、`context.guardrails` 與規則為準。資訊不足時只補最小必要細節並立刻保存；不可悄悄改寫既有事實。持久化 guardrail 不可覆寫或忽略。
+5. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
 6. **判定**：只有已接受的行動，而且結果不確定、失敗有意義時才擲骰。先說明技能、目標值與風險，再執行 `check`；不可事後竄改骰子。每次判定結果都必須向玩家回報角色、技能、roll、目標值與成功等級，不能只敘述後果，也不能把 `hard` 誤稱為「勉強成功」。標準對照為 `critical=大成功`、`extreme=極難成功`、`hard=困難成功`、`success=成功`、`failure=失敗`、`fumble=大失敗`。
 7. **套用後果**：先用 `character adjust`、`entity`、`canon` 寫入狀態，再敘述確定發生的結果。新增 NPC、線索、場景或支線也必須保存。
 8. **Pi 回合驗證**：若環境提供 `trpg_turn_finalize` 工具，所有 CLI 寫入完成後，在獨立的工具回合以 `turnKind=gameplay` 呼叫它；`playerActionStatus` 必須與已保存的行動裁定一致；沒有玩家行動時才可用 `not_applicable` 並填寫 `noPlayerActionReason`。列出已保存的玩家安全變化，確認未洩密且未替玩家決策。若仍在詢問新／舊團、room-id 或缺少的角色設定，可改用 `turnKind=clarification` 並說明等待的玩家輸入；已裁定行動、擲骰或寫入狀態後不得使用此例外。驗證失敗時先補齊狀態，不能直接輸出敘事。其他 agent 沒有此工具時略過工具呼叫，但仍須自行完成同一份檢查。
@@ -51,10 +51,17 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 
 - 詢問或確認：room-id、規則系統、劇本檔案路徑（可無）、基調/界線、角色資料。
 - `room create` 建立房間。若沒有劇本，明確說會即興主持，而不是假裝有原作。
+- 讀完劇本後，把明文禁止事項用 `guardrail add` 寫入 DB；為每條規則列出常見中英文說法與同義改寫的 `forbidden_terms`。條款建立後不可覆寫，且會由每次 `context` 載入。
 - 新團建立完成後保存第一份 player-safe recap，讓下一個 session 能辨識目前開場狀態。
 - 一般捏角必須使用下方「持久化捏角流程」；`character add` 只保留給舊角色匯入，不得用它跳過世界觀審核、骰值與隊伍公平限制。
 - 用 entities 建立 `scene`、`npc`、`quest`、`location`、`clue`、`faction`；狀態 JSON 應包含 `status` 與關係/可見性等必要欄位。
 - 將不可任意改寫的真相用 `canon` 固定，來源使用劇本路徑、session 編號或 `improvised:<session>`。
+
+## 持久化劇本禁止條款
+
+用 `guardrail add` 保存劇本明確禁止的角色設定與行動。每條包含穩定 ID、`character`/`action` scopes、玩家安全的規則敘述、來源，以及 `forbidden_terms`。terms 應涵蓋劇本用詞、常見同義詞與中英文別名，例如「瞬間移動／傳送／teleport」；CLI 會做 Unicode、大小寫、空白與標點正規化，所以「瞬 間 移 動」仍會命中。禁止條款不可覆寫；需要 retcon 時必須建立新的明確版本並經玩家同意，不能修改舊條款。
+
+`creation propose` 和 `action adjudicate` 會在 SQLite 層檢查 guardrails。命中時，即使模型要求 `accepted`，實際保存結果仍強制為 `rejected`，並記錄 `requested_decision` 與 `enforced_guardrails`。這是針對已列 aliases 的確定性防線；沒有列入的全新語意改寫仍需 GM 對照劇本裁定，因此開團時應建立足夠完整但不過度寬泛的 aliases。
 
 ## 持久化捏角流程
 

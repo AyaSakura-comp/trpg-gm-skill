@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,6 +107,15 @@ class GameStore:
                     reason TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'adjudicated'
                 );
+                CREATE TABLE IF NOT EXISTS guardrails (
+                    room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                    id TEXT NOT NULL,
+                    scopes_json TEXT NOT NULL,
+                    statement TEXT NOT NULL,
+                    forbidden_terms_json TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    PRIMARY KEY (room_id, id)
+                );
                 """
             )
             character_columns = {
@@ -161,6 +171,13 @@ class GameStore:
         background: str = "",
         concept: str = "",
     ) -> dict[str, Any]:
+        character_text = " ".join(
+            [name, notes, appearance, background, concept, *(stats or {}).keys()]
+        )
+        matches = self._matching_guardrails(room_id, "character", character_text)
+        if matches:
+            ids = ", ".join(guardrail["id"] for guardrail in matches)
+            raise ValueError(f"legacy import violates character guardrails: {ids}")
         with self._connect() as db:
             db.execute(
                 """INSERT INTO characters
@@ -230,6 +247,132 @@ class GameStore:
         db.execute(
             "INSERT INTO events(room_id, created_at, kind, payload_json) VALUES (?, ?, ?, ?)",
             (room_id, datetime.now(timezone.utc).isoformat(), kind, json.dumps(payload, ensure_ascii=False)),
+        )
+
+    @staticmethod
+    def _normalize_guardrail_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value).casefold()
+        return "".join(character for character in normalized if character.isalnum())
+
+    def add_guardrail(
+        self,
+        room_id: str,
+        guardrail_id: str,
+        *,
+        scopes: list[str],
+        statement: str,
+        forbidden_terms: list[str],
+        source: str,
+    ) -> dict[str, Any]:
+        if self.get_room(room_id) is None:
+            raise KeyError(f"unknown room: {room_id}")
+        valid_scopes = {"character", "action"}
+        if not guardrail_id.strip() or not statement.strip() or not source.strip():
+            raise ValueError("guardrail id, statement, and source must not be empty")
+        if not isinstance(scopes, list) or not scopes or len(scopes) != len(set(scopes)):
+            raise ValueError("guardrail scopes must be a non-empty list of unique values")
+        if not set(scopes).issubset(valid_scopes):
+            raise ValueError("guardrail scopes must be character and/or action")
+        if not isinstance(forbidden_terms, list) or not forbidden_terms or not all(
+            isinstance(term, str) and term.strip() for term in forbidden_terms
+        ):
+            raise ValueError("forbidden_terms must be a non-empty list of strings")
+        normalized_terms = [
+            self._normalize_guardrail_text(term) for term in forbidden_terms
+        ]
+        if any(len(term) < 2 for term in normalized_terms) or len(
+            set(normalized_terms)
+        ) != len(normalized_terms):
+            raise ValueError("forbidden_terms must be unique and at least two normalized characters")
+        result = {
+            "id": guardrail_id.strip(),
+            "scopes": sorted(scopes),
+            "statement": statement.strip(),
+            "forbidden_terms": [term.strip() for term in forbidden_terms],
+            "source": source.strip(),
+        }
+        with self._connect() as db:
+            existing = db.execute(
+                "SELECT * FROM guardrails WHERE room_id = ? AND id = ?",
+                (room_id, result["id"]),
+            ).fetchone()
+            if existing:
+                existing_result = {
+                    "id": existing["id"],
+                    "scopes": json.loads(existing["scopes_json"]),
+                    "statement": existing["statement"],
+                    "forbidden_terms": json.loads(existing["forbidden_terms_json"]),
+                    "source": existing["source"],
+                }
+                if existing_result != result:
+                    raise ValueError(f"guardrail conflict for {result['id']}; guardrails are immutable")
+                return existing_result
+            db.execute(
+                """INSERT INTO guardrails
+                (room_id, id, scopes_json, statement, forbidden_terms_json, source)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    room_id,
+                    result["id"],
+                    json.dumps(result["scopes"], ensure_ascii=False),
+                    result["statement"],
+                    json.dumps(result["forbidden_terms"], ensure_ascii=False),
+                    result["source"],
+                ),
+            )
+            self._append_event(db, room_id, "guardrail_added", result)
+        return result
+
+    def list_guardrails(self, room_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM guardrails WHERE room_id = ? ORDER BY id", (room_id,)
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "scopes": json.loads(row["scopes_json"]),
+                "statement": row["statement"],
+                "forbidden_terms": json.loads(row["forbidden_terms_json"]),
+                "source": row["source"],
+            }
+            for row in rows
+        ]
+
+    def _matching_guardrails(self, room_id: str, scope: str, text: str) -> list[dict[str, Any]]:
+        normalized_text = self._normalize_guardrail_text(text)
+        matches = []
+        for guardrail in self.list_guardrails(room_id):
+            if scope not in guardrail["scopes"]:
+                continue
+            matched_terms = [
+                term
+                for term in guardrail["forbidden_terms"]
+                if self._normalize_guardrail_text(term) in normalized_text
+            ]
+            if matched_terms:
+                matches.append({**guardrail, "matched_terms": matched_terms})
+        return matches
+
+    @staticmethod
+    def _enforce_guardrails(
+        decision: str, basis: str, reason: str, matches: list[dict[str, Any]]
+    ) -> tuple[str, str, str, dict[str, Any]]:
+        if not matches:
+            return decision, basis.strip(), reason.strip(), {}
+        ids = [guardrail["id"] for guardrail in matches]
+        policy_basis = "; ".join(
+            f"{guardrail['id']} ({guardrail['source']}): {guardrail['statement']}"
+            for guardrail in matches
+        )
+        matched = sorted(
+            {term for guardrail in matches for term in guardrail["matched_terms"]}
+        )
+        return (
+            "rejected",
+            policy_basis,
+            f"持久化禁止條款命中：{'、'.join(matched)}",
+            {"requested_decision": decision, "enforced_guardrails": ids},
         )
 
     def save_recap(
@@ -399,6 +542,14 @@ class GameStore:
         if not isinstance(skills, list) or len(skills) != len(set(skills)):
             raise ValueError("skills must be a list of unique names")
         rules = configured["rules"]
+        matches = self._matching_guardrails(
+            room_id,
+            "character",
+            " ".join([name, appearance, background, concept, *skills]),
+        )
+        decision, basis, reason, enforcement = self._enforce_guardrails(
+            decision, basis, reason, matches
+        )
         if decision == "accepted":
             if self.get_character(room_id, character_id) is not None:
                 raise ValueError(f"character already exists: {room_id}/{character_id}")
@@ -417,6 +568,7 @@ class GameStore:
             "decision": decision,
             "basis": basis.strip(),
             "reason": reason.strip(),
+            **enforcement,
         }
         with self._connect() as db:
             cursor = db.execute(
@@ -465,6 +617,16 @@ class GameStore:
 
         rules = configured["rules"]
         skills = json.loads(draft["skills_json"])
+        draft_text = " ".join(
+            [
+                draft["name"], draft["appearance"], draft["background"],
+                draft["concept"], *skills,
+            ]
+        )
+        matches = self._matching_guardrails(room_id, "character", draft_text)
+        if matches:
+            ids = ", ".join(guardrail["id"] for guardrail in matches)
+            raise ValueError(f"accepted draft now violates character guardrails: {ids}")
         rng = random.SystemRandom()
         supplied = rolls or {}
         if not isinstance(supplied, dict):
@@ -568,12 +730,17 @@ class GameStore:
             raise ValueError("reason must explain why the action is accepted or rejected")
         if self.get_character(room_id, character_id) is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
+        matches = self._matching_guardrails(room_id, "action", action)
+        decision, basis, reason, enforcement = self._enforce_guardrails(
+            decision, basis, reason, matches
+        )
         result = {
             "character_id": character_id,
             "action": action.strip(),
             "decision": decision,
             "basis": basis.strip(),
             "reason": reason.strip(),
+            **enforcement,
         }
         with self._connect() as db:
             self._append_event(db, room_id, "action_adjudicated", result)
@@ -676,6 +843,7 @@ class GameStore:
             "room": room,
             "characters": characters,
             "character_creation": creation,
+            "guardrails": self.list_guardrails(room_id),
             "canon": {row["key"]: row["value"] for row in canon_rows},
             "entities": [
                 {"kind": row["kind"], "id": row["id"], "name": row["name"], "state": json.loads(row["state_json"])}

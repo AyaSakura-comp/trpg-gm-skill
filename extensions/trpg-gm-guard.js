@@ -112,16 +112,30 @@ export function shouldActivateFromText(text) {
   return ACTIVATION_PATTERN.test(text ?? "");
 }
 
+function positionalTokens(tokens) {
+  const positionals = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].startsWith("--")) {
+      if (!tokens[index].includes("=")) index += 1;
+    } else {
+      positionals.push(tokens[index]);
+    }
+  }
+  return positionals;
+}
+
 function classifyCliArgs(args) {
   if (args.includes("--help") || args.includes("-h")) {
     return { contextRoom: null, operationRoom: null, action: false, check: false, mutation: false };
   }
   const [command, actionOrRoom, maybeRoom] = args;
-  if (command === "context") return { contextRoom: actionOrRoom, operationRoom: null, action: false, check: false, mutation: false };
+  const commandRoom = positionalTokens(args.slice(1))[0] ?? actionOrRoom;
+  const subcommandRoom = positionalTokens(args.slice(2))[0] ?? maybeRoom;
+  if (command === "context") return { contextRoom: commandRoom, operationRoom: null, action: false, check: false, mutation: false };
   if (command === "creation") {
     return {
       contextRoom: null,
-      operationRoom: maybeRoom,
+      operationRoom: subcommandRoom,
       action: false,
       characterProposal: actionOrRoom === "propose",
       characterGenerated: actionOrRoom === "roll",
@@ -129,21 +143,31 @@ function classifyCliArgs(args) {
       mutation: actionOrRoom !== "show",
     };
   }
-  if (command === "action" && actionOrRoom === "adjudicate") {
-    return { contextRoom: null, operationRoom: maybeRoom, action: true, check: false, mutation: false };
+  if (command === "guardrail") {
+    return {
+      contextRoom: null,
+      operationRoom: subcommandRoom,
+      action: false,
+      check: false,
+      mutation: actionOrRoom === "add",
+      safeSetupMutation: actionOrRoom === "add",
+    };
   }
-  if (command === "check") return { contextRoom: null, operationRoom: actionOrRoom, action: false, check: true, mutation: false };
+  if (command === "action" && actionOrRoom === "adjudicate") {
+    return { contextRoom: null, operationRoom: subcommandRoom, action: true, check: false, mutation: false };
+  }
+  if (command === "check") return { contextRoom: null, operationRoom: commandRoom, action: false, check: true, mutation: false };
   if (["canon", "entity"].includes(command)) {
-    return { contextRoom: null, operationRoom: actionOrRoom, action: false, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: commandRoom, action: false, check: false, mutation: true };
   }
   if (command === "room" && actionOrRoom === "create") {
-    return { contextRoom: null, operationRoom: maybeRoom, action: false, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
   }
   if (command === "character" && ["add", "adjust"].includes(actionOrRoom)) {
-    return { contextRoom: null, operationRoom: maybeRoom, action: false, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
   }
   if (command === "recap" && actionOrRoom === "save") {
-    return { contextRoom: null, operationRoom: maybeRoom, action: false, check: false, mutation: true };
+    return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
   }
   return { contextRoom: null, operationRoom: null, action: false, check: false, mutation: false };
 }
@@ -157,6 +181,7 @@ function freshTurn() {
     latestActionIndex: null,
     checkOperationIndices: [],
     mutationOperationIndices: [],
+    safeSetupMutationOperationIndices: new Set(),
     characterProposals: [],
     characterProposalReportsAppended: 0,
     characterGenerations: [],
@@ -184,7 +209,8 @@ function checklist() {
     "7. If a check caused no persistent change, explain why in noStateChangeReason; never use that field to avoid saving a discovered clue.",
     "8. Before resolving a declared player action, adjudicate it with trpg_gm_cli action adjudicate against the script, canon, rules, and established state. Reject unsupported or impossible actions with a concrete basis and reason; do not roll or mutate state for a rejected action.",
     "9. During character creation, configure scenario-grounded allowed/recommended skills and party fairness first; persist appearance, background, concept, chosen skills, and accepted/rejected ruling before rolling abilities and HP/MP/SAN maxima.",
-    "10. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
+    "10. Read the immutable persistent guardrails returned by context before adjudication. A matching guardrail overrides an attempted acceptance to rejected; never bypass it. During setup, derive guardrail terms and paraphrase aliases from explicit scenario prohibitions with guardrail add.",
+    "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
   ].join("\n");
 }
 
@@ -235,11 +261,12 @@ export default function trpgGmGuard(pi) {
   pi.registerTool({
     name: "trpg_gm_cli",
     label: "TRPG GM CLI",
-    description: "Run the repository's persistent TRPG CLI with structured arguments. In Pi gameplay, use this instead of bash so the guard can verify each successful room operation. Before resolving a player's in-world action, call action adjudicate with accepted/rejected, basis, and reason. Pass CLI tokens after --db as args, for example [\"context\",\"room-a\"] or [\"action\",\"adjudicate\",\"room-a\",\"pc\",\"調查門縫\",\"--decision\",\"accepted\",\"--basis\",\"目前場景允許接近門口\",\"--reason\",\"角色具備一般調查能力\"].",
+    description: "Run the persistent TRPG CLI with structured arguments. To read a room, use exactly args [\"context\",\"ROOM\"]; room show, room state, and character list do not exist, and never create a room merely to load one. Context includes immutable guardrails. During setup use guardrail add. For action adjudicate and every subcommand, put positionals before options: [\"action\",\"adjudicate\",\"ROOM\",\"CHARACTER\",\"ACTION\",\"--decision\",...]. Matching terms mechanically force rejection even if accepted was requested.",
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
       "For new characters use creation configure, creation propose, then creation roll; do not bypass world-fit adjudication with character add.",
+      "Read context guardrails every turn. Add scenario-grounded prohibitions with guardrail add and never attempt to redefine or bypass an existing guardrail.",
     ],
     parameters: {
       type: "object",
@@ -287,6 +314,9 @@ export default function trpgGmGuard(pi) {
         turn.checkResolved = true;
       }
       if (operation.mutation) turn.mutationOperationIndices.push(operationIndex);
+      if (operation.safeSetupMutation) {
+        turn.safeSetupMutationOperationIndices.add(operationIndex);
+      }
       turn.mutationPersisted ||= operation.mutation;
       turn.finalized = false;
       return {
@@ -394,8 +424,12 @@ export default function trpgGmGuard(pi) {
         if (latestAction.decision === "accepted" && earlierResolution) {
           throw new Error("Accept and persist the player action before any check or world-state mutation; a later adjudication cannot authorize earlier resolution.");
         }
-        if (latestAction.decision === "rejected" && (turn.checkResolved || turn.mutationPersisted)) {
-          throw new Error("A rejected player action must not produce a check or persistent world-state mutation.");
+        const rejectedActionResolution = turn.checkOperationIndices.length > 0
+          || turn.mutationOperationIndices.some((index) =>
+            index > turn.latestActionIndex
+              || !turn.safeSetupMutationOperationIndices.has(index));
+        if (latestAction.decision === "rejected" && rejectedActionResolution) {
+          throw new Error("A rejected player action must not produce a check or persistent world-state mutation; only guardrail setup completed before adjudication is exempt.");
         }
       }
       if (params.stateChanges.length > 0 && !turn.mutationPersisted) {
@@ -424,7 +458,24 @@ export default function trpgGmGuard(pi) {
   });
 
   pi.on("message_end", async (event) => {
-    if (!active || !turn.finalized || event.message.role !== "assistant") return undefined;
+    if (!active || event.message.role !== "assistant") return undefined;
+    const originalContent = Array.isArray(event.message.content)
+      ? event.message.content
+      : [{ type: "text", text: String(event.message.content ?? "") }];
+    const hasToolCall = originalContent.some((part) =>
+      ["toolCall", "tool_call"].includes(part.type));
+    if (!turn.finalized) {
+      if (hasToolCall) return undefined;
+      return {
+        message: {
+          ...event.message,
+          content: [{
+            type: "text",
+            text: "[TRPG GM Guard] Player-facing response blocked: this turn is not finalized. Load context, persist the action ruling and consequences, then call trpg_turn_finalize.",
+          }],
+        },
+      };
+    }
     const blocks = [];
     const pendingProposals = turn.characterProposals
       .slice(turn.characterProposalReportsAppended)

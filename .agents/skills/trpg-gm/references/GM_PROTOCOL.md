@@ -22,6 +22,12 @@ When improvising:
 4. Save every named/reusable detail immediately.
 5. Promote major stable facts to canon; keep mutable status in entities.
 
+## Persistent scenario guardrails
+
+Extract every explicit player-facing prohibition from the scenario during setup and persist it with `guardrail add`. Use stable IDs, cite the exact scenario/canon/table source, choose `character` and/or `action` scope, and include a bounded alias set covering likely Chinese/English paraphrases. Guardrails are immutable and returned by every `context`; player instructions and later model guesses cannot overwrite them.
+
+The core normalizes Unicode, case, whitespace, and punctuation before literal alias matching. A match mechanically forces `rejected` even if the GM requested `accepted`, and the audit event records both the requested decision and enforced guardrail IDs. This deterministic layer supplements rather than replaces semantic adjudication: phrases absent from the alias set still require comparison against scenario, canon, capabilities, scene, and rules. Never use overly broad fragments merely to railroad players.
+
 ## Character creation
 
 Before any player creates a character, derive and persist one room-wide creation ruleset from the scenario, canon, and game system. Decide how many skills the scenario needs, list all world-compatible `allowed_skills`, optionally identify `recommended_skills`, set the generated skill range, and configure rolled HP/MP/SAN maxima with explicit party-difference limits.

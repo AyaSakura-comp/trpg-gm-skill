@@ -15,7 +15,25 @@ $GM --db "$DB" context my-room --events 30
 $GM --db "$DB" events my-room
 ```
 
-Use an absolute scenario path when possible. A room cannot be silently recreated under the same id.
+Use an absolute scenario path when possible. A room cannot be silently recreated under the same id. `context` always returns the room's persistent `guardrails`.
+
+## Immutable scenario guardrails
+
+Persist explicit scenario prohibitions before character creation or play:
+
+```bash
+$GM --db "$DB" guardrail add my-room no-supernatural-pcs \
+  --scopes '["character","action"]' \
+  --statement '玩家角色是普通人，不得施法、飛行或瞬間移動。' \
+  --terms '["施法","魔法","飛行","瞬間移動","傳送","teleport"]' \
+  --source 'scenario.md#player-limits'
+
+$GM --db "$DB" guardrail list my-room
+```
+
+`scopes` may contain `character`, `action`, or both. `forbidden_terms` are passed through Unicode NFKC/case folding with whitespace and punctuation removed, so trivial obfuscation such as `瞬 間 移 動` still matches. Include common aliases and translations, but avoid vague fragments that would reject legitimate actions. A guardrail ID is immutable: an identical add is idempotent, while different content raises `guardrail conflict` and cannot be overwritten.
+
+`creation propose` and `action adjudicate` enforce these rules inside SQLite-backed core logic. On a match, a requested `accepted` decision is saved as `rejected`, with `requested_decision`, `enforced_guardrails`, policy-derived `basis`, and a matched-term `reason`. Rejected actions remain unable to produce checks or mutations through the Pi finalizer.
 
 ## Player-safe recaps
 
@@ -69,7 +87,7 @@ $GM --db "$DB" creation propose my-room alice '艾莉絲' \
   --reason '外觀、背景、概念與技能符合世界觀'
 ```
 
-Rejected proposals are also persisted as `character_concept_adjudicated` events. Explain the reason and basis to the player; then ask them to revise the proposal. Only the latest accepted proposal can be rolled.
+Rejected proposals are also persisted as `character_concept_adjudicated` events. Explain the reason and basis to the player; then ask them to revise the proposal. Only the latest accepted proposal can be rolled. `creation roll` rechecks the persisted draft against the current immutable character guardrails, so a prohibition added after an earlier acceptance still blocks generation and requires a revised proposal.
 
 ```bash
 # Secure random rolls:
@@ -84,7 +102,7 @@ Each skill rolls d100 and maps linearly into `skill_min..skill_max`. Resource ma
 
 ## Characters
 
-`character add` is retained for importing legacy/pre-generated characters. Normal new characters must use `creation configure` → `creation propose` → `creation roll`.
+`character add` is retained for importing legacy/pre-generated characters. Normal new characters must use `creation configure` → `creation propose` → `creation roll`. Legacy imports are still checked against every `character`-scoped guardrail using the name, notes, appearance, background, concept, and stat names; they cannot bypass scenario prohibitions.
 
 ```bash
 $GM --db "$DB" character add my-room alice '艾莉絲' \

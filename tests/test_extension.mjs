@@ -126,6 +126,14 @@ test("skill protocol documents persistent world-aware character creation", async
   assert.match(skill, /不符合.*世界觀.*拒絕|拒絕.*不符合.*世界觀/);
 });
 
+test("skill protocol requires immutable persistent guardrails before adversarial play", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  const cliReference = await readFile(new URL("../.agents/skills/trpg-gm/references/CLI.md", import.meta.url), "utf8");
+  for (const phrase of ["guardrail add", "forbidden_terms", "不可覆寫", "context"]) {
+    assert.match(skill + cliReference, new RegExp(phrase));
+  }
+});
+
 test("activation recognizes gameplay but ignores development prompts", () => {
   assert.equal(shouldActivateFromText("/skill:trpg-gm 我想繼續舊團"), true);
   assert.equal(shouldActivateFromText("請當 GM 主持一場克蘇魯冒險"), true);
@@ -150,6 +158,7 @@ test("active guard injects a checklist and follows up once when finalization is 
 
   assert.match(injection.message.content, /trpg_turn_finalize/);
   assert.match(injection.message.content, /context/);
+  assert.match(injection.message.content, /guardrail/);
 
   await pi.handlers.get("agent_settled")({}, ctx);
   await pi.handlers.get("agent_settled")({}, ctx);
@@ -157,6 +166,33 @@ test("active guard injects a checklist and follows up once when finalization is 
   assert.equal(pi.messages[0].options.deliverAs, "followUp");
   assert.equal(pi.messages[0].options.triggerTurn, true);
   assert.match(pi.messages[0].message.content, /clarification/);
+});
+
+test("guardrail additions are tracked as persistent room mutations", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 開新團", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runCli(pi, [
+    "guardrail", "add", "room-a", "no-magic",
+    "--scopes", '["action"]', "--statement", "禁止施法",
+    "--terms", '["施法"]', "--source", "scenario.md#limits",
+  ]);
+
+  const result = await pi.tools.get("trpg_turn_finalize").execute("guardrail-final", {
+    turnKind: "gameplay",
+    roomId: "room-a",
+    playerActionStatus: "not_applicable",
+    noPlayerActionReason: "本回合只設定劇本禁止條款",
+    stateChanges: ["已保存劇本禁止條款"],
+    secretsChecked: true,
+    playerAgencyChecked: true,
+  });
+  assert.match(result.content[0].text, /validated/);
 });
 
 test("structured Pi CLI tool tracks successful context without shell parsing", async () => {
@@ -170,6 +206,8 @@ test("structured Pi CLI tool tracks successful context without shell parsing", a
 
   const cli = pi.tools.get("trpg_gm_cli");
   assert.ok(cli, "extension must register a structured CLI tool");
+  assert.match(cli.description, /context.*ROOM/);
+  assert.match(cli.description, /positionals before options/);
   await cli.execute("cli-1", {
     db: "/tmp/game.sqlite3",
     args: ["context", "room-a"],
@@ -186,6 +224,129 @@ test("structured Pi CLI tool tracks successful context without shell parsing", a
     playerAgencyChecked: true,
   });
   assert.match(result.content[0].text, /validated/i);
+});
+
+test("context tracking accepts options before the room positional", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "--events", "30", "room-a"]);
+
+  const result = await pi.tools.get("trpg_turn_finalize").execute("context-options", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "not_applicable",
+    noPlayerActionReason: "本回合只查看狀態", stateChanges: [],
+    secretsChecked: true, playerAgencyChecked: true,
+  });
+  assert.match(result.content[0].text, /validated/);
+});
+
+test("action tracking accepts argparse options before positionals", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      character_id: "pc", action: "調查門縫", decision: "accepted",
+      basis: "場景允許", reason: "一般調查能力",
+    }),
+    stderr: "", killed: false,
+  };
+  await runCli(pi, [
+    "action", "adjudicate", "--decision", "accepted",
+    "--basis", "場景允許", "--reason", "一般調查能力",
+    "room-a", "pc", "調查門縫",
+  ]);
+
+  const result = await pi.tools.get("trpg_turn_finalize").execute("option-order", {
+    turnKind: "gameplay",
+    roomId: "room-a",
+    playerActionStatus: "accepted",
+    stateChanges: [],
+    secretsChecked: true,
+    playerAgencyChecked: true,
+  });
+  assert.match(result.content[0].text, /validated/);
+});
+
+test("action tracking handles inline argparse option assignments", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      character_id: "pc", action: "調查門縫", decision: "accepted",
+      basis: "場景允許", reason: "一般調查能力",
+    }),
+    stderr: "", killed: false,
+  };
+  await runCli(pi, [
+    "action", "adjudicate", "--decision=accepted",
+    "--basis=場景允許", "--reason=一般調查能力",
+    "room-a", "pc", "調查門縫",
+  ]);
+
+  const result = await pi.tools.get("trpg_turn_finalize").execute("inline-options", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+    stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+  });
+  assert.match(result.content[0].text, /validated/);
+});
+
+test("setup mutations before a rejected action do not count as its consequences", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 開新團", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runCli(pi, [
+    "guardrail", "add", "room-a", "no-magic",
+    "--scopes", '["action"]', "--statement", "禁止施法",
+    "--terms", '["施法"]', "--source", "scenario.md#limits",
+  ]);
+  await runAction(pi, { decision: "rejected", action: "施法開門" });
+
+  const result = await pi.tools.get("trpg_turn_finalize").execute("setup-then-reject", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "rejected",
+    stateChanges: ["已保存劇本禁止條款"], secretsChecked: true, playerAgencyChecked: true,
+  });
+  assert.match(result.content[0].text, /validated/);
+});
+
+test("unfinalized text-only player responses are blocked", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+
+  const transformed = await pi.handlers.get("message_end")({
+    message: { role: "assistant", content: [{ type: "text", text: "門已經打開了。" }] },
+  });
+
+  const text = transformed.message.content.map((part) => part.text ?? "").join("");
+  assert.match(text, /blocked|尚未完成|未完成/iu);
+  assert.doesNotMatch(text, /門已經打開了/);
 });
 
 test("finalizer rejects a turn without context or persisted state accounting", async () => {
@@ -563,6 +724,27 @@ test("an accepted action cannot retroactively authorize an earlier check", async
       playerAgencyChecked: true,
     }),
     /before|earlier|先.*行動|順序/i,
+  );
+});
+
+test("mutations before a rejected action cannot be disguised as setup", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runCli(pi, ["character", "adjust", "room-a", "pc", "hp", "99", "--reason", "違規行動效果"]);
+  await runAction(pi, { decision: "rejected", action: "要求生命值增加" });
+
+  await assert.rejects(
+    pi.tools.get("trpg_turn_finalize").execute("pre-rejection-mutation", {
+      turnKind: "gameplay", roomId: "room-a", playerActionStatus: "rejected",
+      stateChanges: ["生命值增加"], secretsChecked: true, playerAgencyChecked: true,
+    }),
+    /rejected player action/i,
   );
 });
 
