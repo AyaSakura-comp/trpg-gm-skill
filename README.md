@@ -7,6 +7,215 @@
 
 因此，故事創作仍由 agent 負責，但已經發生的事不再只存在聊天上下文裡。
 
+## 安裝
+
+### 系統需求
+
+- Git
+- Python 3.10+
+- Bash（Linux、macOS 或 Windows WSL／Git Bash）
+- Agent 必須能讀檔、執行 shell，並對 campaign DB 目錄有寫入權限
+
+這個 Skill 的 Python CLI 位於同一個 Git repository，因此建議保留完整 clone，再讓各 agent 的 skills 目錄 symlink 到 clone 裡的 `.agents/skills/trpg-gm`。不要只複製 `SKILL.md`，否則 `scripts/`、`references/` 和 `src/trpg_gm/` 不會完整存在。
+
+### 1. Clone 完整 repository
+
+```bash
+INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
+REPO="$INSTALL_ROOT/trpg-gm-skill"
+
+mkdir -p "$INSTALL_ROOT"
+git clone <GIT_REPOSITORY_URL> "$REPO"
+chmod +x "$REPO/.agents/skills/trpg-gm/scripts/trpg-gm"
+
+SKILL_SOURCE="$REPO/.agents/skills/trpg-gm"
+```
+
+如果 repository 已經存在，請不要再次 clone；改用下方的更新命令。
+
+先直接驗證 Python CLI：
+
+```bash
+"$SKILL_SOURCE/scripts/trpg-gm" --help
+```
+
+Skill symlink 可以共用同一份 Git checkout；之後 `git pull` 即可讓所有 agent 同步更新。
+
+### 2. 安裝到 Pi Agent
+
+Pi 會掃描使用者層級的 `~/.agents/skills/`，也會掃描可信任專案中的 `.agents/skills/`。
+
+#### 全域安裝
+
+```bash
+mkdir -p "$HOME/.agents/skills"
+ln -s "$SKILL_SOURCE" "$HOME/.agents/skills/trpg-gm"
+```
+
+若目標已存在，`ln` 會安全地失敗；先檢查舊版本，不要直接覆蓋：
+
+```bash
+ls -ld "$HOME/.agents/skills/trpg-gm"
+```
+
+重新啟動 Pi，然後使用：
+
+```text
+/skill:trpg-gm
+```
+
+也可以讓 Pi 根據 Skill description 自動載入。驗證 discovery 時可明確指定原始 Skill：
+
+```bash
+pi --skill "$SKILL_SOURCE/SKILL.md" -p '/skill:trpg-gm 我想玩 TRPG'
+```
+
+#### 只安裝到某個遊戲 workspace
+
+```bash
+GAME_DIR=/path/to/my-trpg-workspace
+mkdir -p "$GAME_DIR/.agents/skills"
+ln -s "$SKILL_SOURCE" "$GAME_DIR/.agents/skills/trpg-gm"
+```
+
+從 `$GAME_DIR` 啟動 Pi 並接受 project trust。這個 repository 本身已包含 `.agents/skills/trpg-gm`，所以直接從 clone 根目錄啟動 Pi 時不需要額外 symlink。
+
+### 3. 安裝到 OpenAI Codex CLI／IDE
+
+Codex 與 Pi 可以共用同一個使用者層級路徑：
+
+```bash
+mkdir -p "$HOME/.agents/skills"
+ln -s "$SKILL_SOURCE" "$HOME/.agents/skills/trpg-gm"
+```
+
+Codex 官方支援 global `~/.agents/skills`、project `.agents/skills` 與 symlinked skill folders。重新啟動 Codex；在 CLI 或 IDE 中輸入 `$` 選取 `trpg-gm`，或明確寫：
+
+```text
+$trpg-gm 我想繼續舊團並看 recap
+```
+
+專案限定安裝方式與 Pi 相同：
+
+```bash
+mkdir -p /path/to/game/.agents/skills
+ln -s "$SKILL_SOURCE" /path/to/game/.agents/skills/trpg-gm
+```
+
+### 4. 安裝到 Claude Code
+
+Claude Code 的個人 Skill 路徑是 `~/.claude/skills/`，並正式支援 skill directory symlink：
+
+```bash
+mkdir -p "$HOME/.claude/skills"
+ln -s "$SKILL_SOURCE" "$HOME/.claude/skills/trpg-gm"
+```
+
+重新啟動 Claude Code，或在支援 live skill detection 的版本中等待重新掃描。使用：
+
+```text
+/trpg-gm 我想開一個新團
+```
+
+專案限定安裝：
+
+```bash
+GAME_DIR=/path/to/my-trpg-workspace
+mkdir -p "$GAME_DIR/.claude/skills"
+ln -s "$SKILL_SOURCE" "$GAME_DIR/.claude/skills/trpg-gm"
+```
+
+Claude Code 只會自動掃描 `.claude/skills`，不會把本 repo 的 `.agents/skills` 當作 Claude project Skill，因此需要上述 symlink。
+
+### 5. 安裝到 Hermes Agent
+
+Hermes 的主要 Skill 目錄是 `$HERMES_HOME/skills/`，預設為 `~/.hermes/skills/`。
+
+#### 方法 A：直接 symlink
+
+```bash
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/skills"
+ln -s "$SKILL_SOURCE" "$HERMES_HOME/skills/trpg-gm"
+```
+
+重新啟動 Hermes，或開新 session，然後使用：
+
+```text
+/trpg-gm 我想玩 TRPG
+```
+
+確認安裝：
+
+```bash
+hermes skills list
+```
+
+#### 方法 B：讓 Hermes 共用 `~/.agents/skills`
+
+如果 Pi 和 Codex 已經使用 `~/.agents/skills/trpg-gm`，可在 `~/.hermes/config.yaml` 加入：
+
+```yaml
+skills:
+  external_dirs:
+    - ~/.agents/skills
+```
+
+如此不需要第二個 symlink。重新啟動 Hermes 或 `/reset`，再用 `/trpg-gm` 載入。
+
+> Hermes 的 external skill directory 若可寫，agent 也可能修改其中內容；需要唯讀部署時請使用檔案權限限制。
+
+### 6. 共用安裝快速版
+
+Pi、Codex 與 Hermes 可以共用 `~/.agents/skills`；Claude Code 另外建立一個 symlink：
+
+```bash
+mkdir -p "$HOME/.agents/skills" "$HOME/.claude/skills"
+ln -s "$SKILL_SOURCE" "$HOME/.agents/skills/trpg-gm"
+ln -s "$SKILL_SOURCE" "$HOME/.claude/skills/trpg-gm"
+
+# Hermes config.yaml 再加入：
+# skills:
+#   external_dirs:
+#     - ~/.agents/skills
+```
+
+最終結構：
+
+```text
+~/.local/share/trpg-gm-skill/          # 完整 Git clone + Python
+└── .agents/skills/trpg-gm/
+
+~/.agents/skills/trpg-gm              # Pi + Codex，共用 symlink
+~/.claude/skills/trpg-gm              # Claude Code symlink
+~/.hermes/config.yaml                  # Hermes external_dirs 指向 ~/.agents/skills
+```
+
+### 更新與移除
+
+更新完整 Git checkout：
+
+```bash
+git -C "$REPO" pull --ff-only
+PYTHONPATH="$REPO/src" python3 -m unittest discover -s "$REPO/tests" -v
+```
+
+Symlink 不需要重建。更新後重啟 agent；Pi 也可以使用 `/reload`。
+
+移除時先刪除各 agent 的 symlink，再刪除 clone。**不要刪除 campaign DB**：遊戲資料應放在遊戲 workspace 的 `.trpg/rooms/`，而不是安裝 repository 裡。
+
+```bash
+rm "$HOME/.agents/skills/trpg-gm"
+rm "$HOME/.claude/skills/trpg-gm"
+# 如果使用 Hermes direct symlink：
+rm "${HERMES_HOME:-$HOME/.hermes}/skills/trpg-gm"
+
+# 確認沒有需要保留的檔案後才執行：
+rm -rf "$REPO"
+```
+
+安裝路徑依據官方文件：[Pi Skills](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md)、[Codex Build skills](https://learn.chatgpt.com/docs/build-skills)、[Claude Code Skills](https://code.claude.com/docs/en/slash-commands)、[Hermes Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)。
+
 ## 系統組成
 
 ```text

@@ -1,7 +1,7 @@
 ---
 name: trpg-gm
 description: 主持具持久狀態的 TRPG 遊戲；管理房間、劇本、玩家角色、HP/MP/SAN、NPC、線索、支線、場景、判定與世界觀 canon。當使用者要開團、繼續團務、扮演角色、進行 TRPG 或要求 GM 主持時使用。
-compatibility: Requires Python 3.10+ and filesystem access. Uses only the Python standard library and SQLite.
+compatibility: Requires Python 3.10+, Bash, and filesystem access. Uses only the Python standard library and SQLite.
 ---
 
 # Persistent TRPG GM

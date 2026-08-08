@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -19,6 +20,29 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--db", db, "context", "demo"]), 0)
 
             self.assertEqual(json.loads(output.getvalue())["room"]["id"], "demo")
+
+    def test_skill_wrapper_works_when_skill_directory_is_symlinked(self):
+        repository = Path(__file__).resolve().parents[1]
+        source_skill = repository / ".agents" / "skills" / "trpg-gm"
+        with tempfile.TemporaryDirectory() as directory:
+            install_root = Path(directory) / ".agents" / "skills"
+            install_root.mkdir(parents=True)
+            installed_skill = install_root / "trpg-gm"
+            installed_skill.symlink_to(source_skill, target_is_directory=True)
+            db = Path(directory) / "game.sqlite3"
+
+            result = subprocess.run(
+                [
+                    str(installed_skill / "scripts" / "trpg-gm"),
+                    "--db", str(db), "room", "create", "demo", "--system", "coc7",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["id"], "demo")
 
     def test_recap_save_and_show_emit_latest_player_safe_recap(self):
         with tempfile.TemporaryDirectory() as directory:
