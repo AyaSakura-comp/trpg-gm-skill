@@ -677,6 +677,32 @@ Pi 若只信任並開啟此 repo，會從 `.agents/skills/` 發現 Skill，但�
 
 ## 測試
 
+### 測試哲學：每一個改動都要跑
+
+本專案把測試視為功能的一部分，不是完成後才補做的檢查。**任何改動——包含 Python、Pi Extension、Skill 指令、文件、CLI 範例、package metadata 與版本號——在 commit 或 push 前都必須執行完整的 `npm test`。** 不得以「只改一行」、「只改文件」或「本機看起來正常」為理由跳過。
+
+開發與維護遵守以下原則：
+
+1. **RED → GREEN → REFACTOR**：功能或 bugfix 先新增能重現需求／漏洞且確實失敗的 regression test，再做最小修正，最後在完整測試仍通過的前提下整理程式。
+2. **每個缺陷都留下測試**：實玩、code review 或惡意玩家找到的每一條繞過方式，都必須轉成永久 regression test，不能只修當下案例。
+3. **測持久狀態，不只測文字回覆**：agent 說「已拒絕」不代表安全；測試必須直接檢查 SQLite event、角色資源、canon、entity、guardrail 與 finalization 紀錄，確認沒有偷偷擲骰或改變世界。
+4. **跨層防禦要分層驗證**：Python／SQLite 測不可繞過的核心規則；Node.js 測 Pi lifecycle、structured tools 與 finalization；真實 Pi Agent 測模型是否能正確使用整套 workflow。Prompt instruction 不能代替程式驗證。
+5. **同時測 happy path 與 adversarial path**：除了正常創角與行動，也要測越權、假冒 GM、prompt injection、混淆禁止詞、秘密索取、先修改後裁定、options 變形及 legacy command bypass。
+6. **跨 session 才算真正持久化**：連續性測試使用相同 room DB、不同 agent sessions，而且不得使用聊天 continuation；新 session 必須只靠 `context` 恢復。
+7. **隔離測試資料**：E2E／模型測試使用 `mktemp` 建立 `/tmp` workspace 與獨立 SQLite，不得污染正式 campaign DB。
+8. **失敗就不提交**：不得刪除、skip、放寬 assertion 或吞掉錯誤來換取綠燈。先找根因；修正後從 targeted test 回到完整 suite。
+9. **回覆不是證據**：模型測試需保留 prompt、response、耗時和機器可讀 evaluation，並以 DB 查詢驗證資源未變、秘密未洩漏、拒絕已保存。
+10. **安全與工作流程改動要跑真實 Agent**：凡是修改 guardrail、action adjudication、character creation、context loading、secret handling、tool schema 或 finalizer，除自動測試外，還必須使用 production-like Pi Agent 做隔離的端對端／惡意玩家測試，並將結果寫入 `docs/`。
+
+每次改動的最低驗證門檻：
+
+```bash
+npm test
+git diff --check
+```
+
+建議提交前紀錄當次測試數量與結果。若改動會影響玩家可見行為或安全邊界，還要執行下方的 Pi Agent 多 Session／對抗測試；單元測試不能取代模型實玩，模型實玩也不能取代單元測試。
+
 ### 完整自動測試
 
 ```bash
