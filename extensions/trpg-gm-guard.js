@@ -39,6 +39,32 @@ function formatCheckReport(check) {
   return `- ${check.characterId} 的${check.stat}：${label}（${check.degree}，roll ${check.roll}，目標 ${check.target}）`;
 }
 
+function hasNovelLikeActionPassage(text) {
+  const withoutHandoff = String(text ?? "")
+    .replace(/(?:你|下一位|[A-Za-z0-9_-]+)\s*(?:現在)?(?:要|想|會)?\s*怎麼做[？?]?/giu, "")
+    .replace(/what (?:do|will|would) (?:you|[A-Za-z0-9_-]+) do\??/giu, "");
+  return withoutHandoff.split(/\n\s*\n/u).some((paragraph) => {
+    const prose = paragraph
+      .split("\n")
+      .filter((line) => !/^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|```)/u.test(line))
+      .join(" ")
+      .replace(/[*_`>#|]/gu, " ")
+      .trim();
+    const meaningfulCharacters = prose.replace(/[\s\p{P}\p{S}]/gu, "").length;
+    const sentences = prose.match(/[。！？.!?]/gu)?.length ?? 0;
+    return meaningfulCharacters >= 60 && sentences >= 2;
+  });
+}
+
+function repeatsRejectedActionLiteral(text, action) {
+  const normalize = (value) => String(value ?? "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[\s\p{P}\p{S}]/gu, "");
+  const normalizedAction = normalize(action);
+  return normalizedAction.length >= 4 && normalize(text).includes(normalizedAction);
+}
+
 function parseCharacterGeneration(stdout) {
   let value;
   try {
@@ -314,6 +340,7 @@ function freshTurn() {
     checkReportAppended: false,
     mutationPersisted: false,
     finalized: false,
+    playerFacingNarrativeValidated: false,
     reminderSent: false,
   };
 }
@@ -335,7 +362,7 @@ function checklist() {
     "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
     "13. Use context.participation to give equal spotlight opportunities to all eligible players. Prefer next_spotlight_character_ids when inviting the next action. Only exclude a character whose persisted availability or HP says they cannot act; record other temporary inability with trpg_gm_character_availability.",
     "14. Read context.story_progress. After each accepted, countable player action, persist advanced or stalled with trpg_gm_story_progress. At three consecutive stalled actions, persist a concrete in-world event with trpg_gm_story_intervene before narrating or accepting another action; never replace the objective to evade this clock. A forced transition must happen directly through the world event, not by requiring the player to choose a prescribed option. After the scene changes, return an open-ended action prompt and confirm eventDrivenTransitionChecked=true.",
-    "15. The GM is the storyteller: render gameplay in rich, novel-like detail. Establish spatial layout, concrete objects, sensory cues, atmosphere, NPC/world activity, and how the scene changes, while staying grounded in persisted player-visible facts. Never fill detail by deciding a player character's thoughts, feelings, speech, movement, or reaction. Confirm this with narrativeDetailChecked=true when finalizing gameplay narration.",
+    "15. The GM is the storyteller: every accepted or rejected action, including one blocked by rules or impossibility, requires at least a short novel-like passage grounded in player-visible facts. For a rejected action, narrate the established obstacle, unchanged surroundings, or NPC/world response without making the rejected action occur or mutating the world, then state the reason and basis. Never respond only with a ruling summary such as ‘X did something / not allowed; what does Y do?’ and immediately hand off. Establish concrete objects, sensory atmosphere, and world activity without deciding a player character's thoughts, feelings, speech, movement, or reaction. Confirm this with narrativeDetailChecked=true.",
     "16. Adjudicate fictional actions by the setting's time and place（時空背景）. Never reject solely because modern law（現代法律）, contemporary customs, morality, or political correctness（政治正確）disapproves; if the action is possible under scenario, canon, capabilities, scene, and rules, accept the attempt and apply era-grounded risks and consequences（後果）. Create guardrails only from explicit scenario/canon prohibitions or player-agreed table boundaries, not inferred modern norms.",
   ].join("\n");
 }
@@ -590,6 +617,7 @@ export default function trpgGmGuard(pi) {
     }
     turn.mutationPersisted ||= operation.mutation && !operation.doesNotResolveAction;
     turn.finalized = false;
+    turn.playerFacingNarrativeValidated = false;
     return {
       content: [{ type: "text", text: result.stdout || "{}" }],
       details: { db: params.db, args: params.args, operation },
@@ -897,7 +925,7 @@ export default function trpgGmGuard(pi) {
         playerAgencyChecked: { type: "boolean" },
         narrativeDetailChecked: {
           type: "boolean",
-          description: "For gameplay narration, confirm the response richly depicts player-visible space, objects, sensory atmosphere, NPC/world activity, and scene changes without inventing player-character reactions; use true for a clarification with no narration",
+          description: "For every accepted or rejected action, confirm the response includes at least a short novel-like player-visible passage rather than only a ruling summary and handoff; rejected actions must remain unperformed and cause no invented world change. Also confirm grounded space, objects, sensory atmosphere, NPC/world activity, and no invented player-character reaction; use true for a clarification with no narration",
         },
         eventDrivenTransitionChecked: {
           type: "boolean",
@@ -914,7 +942,7 @@ export default function trpgGmGuard(pi) {
         throw new Error("Confirm that the response does not make additional player-character decisions.");
       }
       if (!params.narrativeDetailChecked) {
-        throw new Error("Confirm that gameplay narration is detailed and novel-like while remaining grounded and player-agency safe.");
+        throw new Error("Confirm that every accepted or rejected action receives a detailed, grounded novel-like passage, never only a ruling summary and handoff, while remaining player-agency safe.");
       }
       if (turn.storyInterventionPersisted && !params.eventDrivenTransitionChecked) {
         throw new Error("Confirm that the forced transition happens through the persisted world event without requiring the player to choose a prescribed option.");
@@ -1008,6 +1036,7 @@ export default function trpgGmGuard(pi) {
         throw new Error("A check was resolved without a persisted state change; save its consequence or provide noStateChangeReason.");
       }
       turn.finalized = true;
+      turn.playerFacingNarrativeValidated = false;
       return {
         content: [{ type: "text", text: `TRPG turn validated for room ${params.roomId}. You may now give the player-facing response.` }],
         details: {
@@ -1028,6 +1057,7 @@ export default function trpgGmGuard(pi) {
 
   pi.on("message_end", async (event) => {
     if (!active || event.message.role !== "assistant") return undefined;
+    if (turn.playerFacingNarrativeValidated) return undefined;
     const originalContent = Array.isArray(event.message.content)
       ? event.message.content
       : [{ type: "text", text: String(event.message.content ?? "") }];
@@ -1045,6 +1075,39 @@ export default function trpgGmGuard(pi) {
         },
       };
     }
+    const originalText = originalContent
+      .filter((part) => part.type === "text")
+      .map((part) => String(part.text ?? ""))
+      .join("\n");
+    if (turn.actionAdjudications.length > 0 && !hasNovelLikeActionPassage(originalText)) {
+      turn.finalized = false;
+      turn.reminderSent = false;
+      return {
+        message: {
+          ...event.message,
+          content: [{
+            type: "text",
+            text: "[TRPG GM Guard] Player-facing action response blocked: add at least a short grounded novel-like passage before the ruling and handoff. For a rejected action, describe only the established obstacle or unchanged player-visible scene; do not make the rejected action occur.",
+          }],
+        },
+      };
+    }
+    const actionForNarration = turn.actionAdjudications.at(-1);
+    if (actionForNarration?.decision === "rejected"
+        && repeatsRejectedActionLiteral(originalText, actionForNarration.action)) {
+      turn.finalized = false;
+      turn.reminderSent = false;
+      return {
+        message: {
+          ...event.message,
+          content: [{
+            type: "text",
+            text: "[TRPG GM Guard] Player-facing response blocked: do not replay the rejected action as completed fiction. Narrate only the established obstacle or unchanged player-visible scene; the guard will append the exact rejected ruling separately.",
+          }],
+        },
+      };
+    }
+    turn.playerFacingNarrativeValidated = true;
     const blocks = [];
     const pendingProposals = turn.characterProposals
       .slice(turn.characterProposalReportsAppended)

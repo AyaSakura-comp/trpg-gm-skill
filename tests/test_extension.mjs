@@ -157,6 +157,32 @@ test("skill protocol requires novel-like detailed world narration", async () => 
   assert.match(guidance, /不得.*玩家角色.*反應|不可.*玩家角色.*反應/s);
 });
 
+test("every accepted or rejected action injects a novel-like response requirement", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  const protocol = await readFile(new URL("../.agents/skills/trpg-gm/references/GM_PROTOCOL.md", import.meta.url), "utf8");
+  const guidance = skill + protocol;
+  assert.match(guidance, /每一(?:次|個).*行動.*小說/s);
+  assert.match(guidance, /(?:rejected|拒絕|不允許).*(?:小說|敘事)|(?:小說|敘事).*(?:rejected|拒絕|不允許)/s);
+  assert.match(guidance, /不得.*(?:只|僅).*(?:做了什麼|摘要|裁定).*(?:要怎麼做|下一位)/s);
+
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("session_start")({}, ctx);
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  const injection = await pi.handlers.get("before_agent_start")(
+    { prompt: "我嘗試穿牆", source: "interactive" },
+    ctx,
+  );
+  assert.match(injection.message.content, /every (?:accepted or rejected|player) action/i);
+  assert.match(injection.message.content, /rejected/i);
+  assert.match(injection.message.content, /novel-like/i);
+  assert.match(injection.message.content, /never respond only with/i);
+});
+
 test("finalizer requires an explicit detailed-narration confirmation", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
@@ -1426,7 +1452,7 @@ test("player actions require persisted adjudication and rejected actions report 
   const amended = await pi.handlers.get("message_end")({
     message: {
       role: "assistant",
-      content: [{ type: "text", text: "這個行動無法執行。" }],
+      content: [{ type: "text", text: "鐵門仍沉默地嵌在潮濕石牆之間，鉚釘與鎖鏈在冷光下沒有一絲鬆動。門前沒有能讓人飛越的空隙，角色卡中也不存在翅膀或其他飛行能力；風只從門框細縫滲入，帶著地下走廊的霉味。這個行動無法執行。" }],
     },
   }, ctx);
   const text = amended.message.content.map((part) => part.text ?? "").join("");
@@ -1435,6 +1461,81 @@ test("player actions require persisted adjudication and rejected actions report 
   assert.match(text, /宣稱自己有翅膀並飛過鎖門/);
   assert.match(text, /角色沒有翅膀或其他飛行手段/);
   assert.match(text, /角色卡與劇本均未建立飛行能力/);
+
+  const recursive = await pi.handlers.get("message_end")({
+    message: amended.message,
+  }, ctx);
+  assert.equal(recursive, undefined, "the guard must not reject its own appended ruling on a repeated message_end");
+});
+
+test("terse ruling-and-handoff text is blocked after accepted or rejected action finalization", async () => {
+  for (const decision of ["accepted", "rejected"]) {
+    const pi = createFakePi();
+    trpgGuard(pi);
+    const ctx = context();
+    await pi.handlers.get("input")(
+      { text: "/skill:trpg-gm 繼續遊戲；徒手觸碰實心牆", source: "interactive" },
+      ctx,
+    );
+    await runCli(pi, ["context", "room-a"]);
+    await runAction(pi, {
+      action: "徒手觸碰實心牆",
+      decision,
+      basis: decision === "accepted" ? "牆面就在角色面前" : "牆體被不可接觸的力場隔絕",
+      reason: decision === "accepted" ? "普通接觸可以執行" : "目前無法接觸牆面",
+    });
+    if (decision === "accepted") await runProgress(pi);
+    await pi.tools.get("trpg_turn_finalize").execute(`finalize-${decision}`, {
+      turnKind: "gameplay",
+      roomId: "room-a",
+      playerActionStatus: decision,
+      stateChanges: [],
+      secretsChecked: true,
+      playerAgencyChecked: true,
+      narrativeDetailChecked: true,
+    });
+
+    const transformed = await pi.handlers.get("message_end")({
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: `pc 的行動 ${decision}。下一位要怎麼做？` }],
+      },
+    }, ctx);
+    const text = transformed.message.content.map((part) => part.text ?? "").join("");
+    assert.match(text, /blocked|小說|novel-like|敘事/iu);
+    assert.doesNotMatch(text, new RegExp(`pc 的行動 ${decision}`));
+  }
+});
+
+test("rejected action text cannot be replayed as completed inside rich narration", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲；徒手穿過實心牆", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runAction(pi, {
+    action: "徒手穿過實心牆",
+    decision: "rejected",
+    basis: "牆體完整且角色沒有超自然能力",
+    reason: "目前不可能穿過實心牆",
+  });
+  await pi.tools.get("trpg_turn_finalize").execute("finalize-rejected-replay", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "rejected",
+    stateChanges: [], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
+  });
+
+  const transformed = await pi.handlers.get("message_end")({
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "石牆在火把下投出厚重陰影，粗糙灰泥簌簌落下，潮濕空氣裡滿是陳舊石粉的氣味。你徒手穿過實心牆，來到另一側冰冷的密室；身後走廊的火光很快被整面牆完全遮斷。密室深處傳來緩慢滴水聲，黑暗中的回音沿著拱形屋頂來回震盪。" }],
+    },
+  }, ctx);
+  const text = transformed.message.content.map((part) => part.text ?? "").join("");
+  assert.match(text, /blocked|rejected action|拒絕/iu);
+  assert.doesNotMatch(text, /來到另一側冰冷的密室/);
 });
 
 test("a check cannot execute before an accepted action", async () => {
@@ -1532,7 +1633,7 @@ test("final player-facing answer reports every resolved check canonically", asyn
   const amended = await pi.handlers.get("message_end")({
     message: {
       role: "assistant",
-      content: [{ type: "text", text: "你在門縫裡看見一小段纖維。" }],
+      content: [{ type: "text", text: "門板在走廊昏黃的燈光下泛著潮濕暗色，狹窄門縫裡只有積塵與粗糙木紋，沒有足以改變局勢的新線索。冷風從另一側斷續滲來，讓門框上的蛛網輕輕顫動；周圍依然安靜，鎖舌也沒有任何變化。" }],
     },
   }, ctx);
 

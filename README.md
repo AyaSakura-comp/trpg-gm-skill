@@ -415,7 +415,7 @@ Extension 另提供 `trpg_turn_finalize` 工具。Agent 必須在所有狀態操
 
 `trpg_turn_finalize` 的 `turnKind` 通常使用 `gameplay`。若 Skill 正在詢問「新團或舊團」、room-id、劇本或角色等缺少資訊，可使用 `clarification`，並在 `noStateChangeReason` 說明正在等待哪一項玩家輸入；已經擲骰或寫入狀態的回合不能藉此跳過驗證。
 
-這是一個流程 guard，不是安全邊界或完整的故事內容審查器。`narrativeDetailChecked` 是模型在輸出前的強制自我確認，無法直接量測最終自然語言的文學性或詳細程度；它也無法百分之百判斷一條新線索是否漏存。`agent_settled` 發生在模型產生回覆之後：follow-up 可以要求修正，但不能撤回已經串流到前端的文字。秘密資訊、敘事品質與持久化完整性仍必須由 Skill 規範與模型遵守；結構化 finalization、SQLite 事件紀錄、production-like E2E 及人工監督應共同使用。
+這是一個流程 guard，不是安全邊界或完整的故事內容審查器。`narrativeDetailChecked` 仍是模型在輸出前的強制自我確認；此外，v0.13 起 `message_end` 對每個已裁定 action 執行 bounded prose validation：移除交棒問句與 Markdown 清單後，至少要有一段 60 個 meaningful characters、兩個句末標點的敘事，否則阻擋回覆並要求修正。Rejected action 的最終文字若逐字重播其正規化 action 原句也會被阻擋，以免把未發生的嘗試寫成既成事實。這些長度、句子及 literal-match 檢查不能直接量測真正文學性，也不能識別所有語意改寫、秘密洩漏或漏存線索；`agent_settled` 發生在模型產生回覆之後，follow-up 可以要求修正，但不能撤回已經串流到前端的文字。秘密資訊、敘事品質與持久化完整性仍須由 Skill 規範、結構化 finalization、SQLite 事件紀錄、production-like E2E 及人工監督共同防護。
 
 ## Python 負責什麼
 
@@ -643,11 +643,13 @@ $GM --db "$DB" entity miskatonic npc caretaker '老管理員' \
 
 ### 7. 回覆玩家
 
-Agent 根據已保存的結果產生遊戲內敘事，通常包含：
+Agent 根據已保存的結果產生遊戲內敘事。每一次玩家行動都必須獲得至少一小段小說式回覆，無論裁定是 accepted、rejected、規則不允許或當下不可能；不得只輸出「某人做了什麼／不允許，下一位要怎麼做？」就交棒。Rejected 行動沒有實際發生，因此只能描寫玩家可見的既有障礙、未改變環境或 NPC／世界狀態，然後清楚說明拒絕理由，不得捏造行動成功或世界後果。
+
+回覆通常包含：
 
 1. 場景與感官資訊
-2. NPC 或環境反應
-3. 判定與可見資源變化
+2. NPC 或環境反應；若 rejected，則呈現既有障礙或可感知限制
+3. 判定、裁定理由與可見資源變化
 4. 目前壓力或已發現線索
 5. 「你要怎麼做？」
 
@@ -948,7 +950,7 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 - Session 收尾保存 player-safe recap；舊團入口顯示 recap，而不是完整私密 context。
 - 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
 
-本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事、[`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場，以及 [`QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md`](docs/QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md) 的時代背景優先犯罪行動裁定。
+本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事、[`QWEN_EVERY_ACTION_NARRATIVE_E2E.md`](docs/QWEN_EVERY_ACTION_NARRATIVE_E2E.md) 的每次 accepted／rejected 行動小說回覆 hook、[`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場，以及 [`QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md`](docs/QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md) 的時代背景優先犯罪行動裁定。
 
 ## 目前邊界
 
@@ -980,6 +982,7 @@ trpg-gm-skill/
 │   ├── LUNA_PLAYTEST.md
 │   ├── PI_AGENT_DEPLOYMENT.md
 │   ├── QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md
+│   ├── QWEN_EVERY_ACTION_NARRATIVE_E2E.md
 │   ├── QWEN_EVENT_DRIVEN_TRANSITION_E2E.md
 │   ├── QWEN_MTP_GUARDRAIL_PLAYTEST.md
 │   ├── QWEN_NARRATIVE_DETAIL_E2E.md

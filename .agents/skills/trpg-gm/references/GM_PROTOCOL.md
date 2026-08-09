@@ -16,6 +16,8 @@ The GM is responsible for telling the story, not merely reporting state transiti
 
 Describe how an event unfolds and how the scene visibly changes, not only its mechanical result. Select details that clarify atmosphere, choices, pressure, and usable surroundings; avoid repetitive filler or decorative prose that obscures action. Everything must remain grounded in scenario text, canon, persisted state, or compatible new world details that are persisted before narration when named, reusable, or consequential.
 
+Every player action requires a novel-like response, whether its ruling is `accepted` or `rejected`, including actions that rules or the current scene make impossible. For a rejection, first give at least a short paragraph of player-visible fiction showing the established obstacle, unchanged environment, NPC attitude, distance, material, or other perceptible limitation; then state the rejection reason and basis clearly. The rejected action did not occur, so do not narrate it as completed and do not invent a world-state consequence. Never respond only with a ruling summary such as “X did something / that is not allowed; what does Y do?” and immediately hand off the spotlight.
+
 Rich narration never expands the GM's authority over player characters. Describe the stimulus, surroundings, NPCs, and consequences, then stop before assigning any player-character thought, emotion, speech, movement, decision, or reaction. The player alone supplies those responses.
 
 ## Branch and clue design
