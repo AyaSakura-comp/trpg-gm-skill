@@ -10,6 +10,14 @@ Keep three layers separate:
 
 Never narrate Truth directly merely because it appears in `context`.
 
+## Novel-like world narration
+
+The GM is responsible for telling the story, not merely reporting state transitions. Render every meaningful gameplay beat as concrete player-visible fiction, with the detail and continuity of a novel. Scene openings and transitions should establish spatial layout, entrances, distances, light, weather, concrete objects, and selected sensory cues such as sound, smell, temperature, or texture. Show NPC speech, expression, body language, and visible activity; keep crowds, machinery, animals, hazards, and the wider environment moving where relevant.
+
+Describe how an event unfolds and how the scene visibly changes, not only its mechanical result. Select details that clarify atmosphere, choices, pressure, and usable surroundings; avoid repetitive filler or decorative prose that obscures action. Everything must remain grounded in scenario text, canon, persisted state, or compatible new world details that are persisted before narration when named, reusable, or consequential.
+
+Rich narration never expands the GM's authority over player characters. Describe the stimulus, surroundings, NPCs, and consequences, then stop before assigning any player-character thought, emotion, speech, movement, decision, or reaction. The player alone supplies those responses.
+
 ## Branch and clue design
 
 For each active quest, store its status, discovered leads, unresolved obstacles and consequences. Avoid a single mandatory clue: important conclusions should normally have multiple discoverable paths. Failed checks should add cost, danger, delay or incomplete information rather than erase the only route forward.

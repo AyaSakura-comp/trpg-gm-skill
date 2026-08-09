@@ -335,6 +335,7 @@ function checklist() {
     "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
     "13. Use context.participation to give equal spotlight opportunities to all eligible players. Prefer next_spotlight_character_ids when inviting the next action. Only exclude a character whose persisted availability or HP says they cannot act; record other temporary inability with trpg_gm_character_availability.",
     "14. Read context.story_progress. After each accepted, countable player action, persist advanced or stalled with trpg_gm_story_progress. At three consecutive stalled actions, persist a concrete in-world event with trpg_gm_story_intervene before narrating or accepting another action; never replace the objective to evade this clock.",
+    "15. The GM is the storyteller: render gameplay in rich, novel-like detail. Establish spatial layout, concrete objects, sensory cues, atmosphere, NPC/world activity, and how the scene changes, while staying grounded in persisted player-visible facts. Never fill detail by deciding a player character's thoughts, feelings, speech, movement, or reaction. Confirm this with narrativeDetailChecked=true when finalizing gameplay narration.",
   ].join("\n");
 }
 
@@ -853,7 +854,7 @@ export default function trpgGmGuard(pi) {
   pi.registerTool({
     name: "trpg_turn_finalize",
     label: "TRPG Turn Finalize",
-    description: "Validate that the current TRPG GM turn loaded room context, persisted consequences, protected secrets, and preserved player agency. Call after all trpg_gm_cli state commands and before the player-facing answer.",
+    description: "Validate that the current TRPG GM turn loaded room context, persisted consequences, protected secrets, preserved player agency, and prepared rich novel-like world narration. Call after all trpg_gm_cli state commands and before the player-facing answer.",
     promptSnippet: "Finalize and validate a TRPG GM turn after all state writes",
     promptGuidelines: [
       "Call trpg_turn_finalize after all trpg_gm_cli commands and before every final player-facing TRPG response.",
@@ -861,7 +862,7 @@ export default function trpgGmGuard(pi) {
     parameters: {
       type: "object",
       additionalProperties: false,
-      required: ["turnKind", "roomId", "playerActionStatus", "stateChanges", "secretsChecked", "playerAgencyChecked"],
+      required: ["turnKind", "roomId", "playerActionStatus", "stateChanges", "secretsChecked", "playerAgencyChecked", "narrativeDetailChecked"],
       properties: {
         turnKind: {
           type: "string",
@@ -893,6 +894,10 @@ export default function trpgGmGuard(pi) {
         },
         secretsChecked: { type: "boolean" },
         playerAgencyChecked: { type: "boolean" },
+        narrativeDetailChecked: {
+          type: "boolean",
+          description: "For gameplay narration, confirm the response richly depicts player-visible space, objects, sensory atmosphere, NPC/world activity, and scene changes without inventing player-character reactions; use true for a clarification with no narration",
+        },
       },
     },
     async execute(_toolCallId, params) {
@@ -902,6 +907,9 @@ export default function trpgGmGuard(pi) {
       }
       if (!params.playerAgencyChecked) {
         throw new Error("Confirm that the response does not make additional player-character decisions.");
+      }
+      if (!params.narrativeDetailChecked) {
+        throw new Error("Confirm that gameplay narration is detailed and novel-like while remaining grounded and player-agency safe.");
       }
       if (params.turnKind === "clarification") {
         if (params.playerActionStatus !== "not_applicable") {

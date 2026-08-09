@@ -104,10 +104,16 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 2. 優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
 3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；DB guardrail 命中時會把錯誤的 `accepted` 強制改成 `rejected`。被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
 4. 角色生成後，要求 GM 先根據已保存的角色背景／概念設定具體開場 chapter/objective，呈現玩家可感知的故事背景並交還第一個行動選擇；完成前拒絕玩家 action 與 finalization。
-5. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
+5. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密、玩家自主權及詳細敘事品質的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
 6. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
 
 Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Python CLI 寫入 SQLite。
+
+### GM 負責詳細講述故事
+
+GM 不能只回報資料庫狀態或用幾句摘要跳過場景。每個 gameplay 場景都應以小說式的具體段落呈現玩家可感知的世界：交代空間布局、出入口與物件位置，選擇有辨識度的視覺、聲音、氣味、溫度或觸感，描寫 NPC 的語氣、表情、動作，以及背景環境如何持續活動。事件發生時要寫出過程、可見後果與場景前後的變化，而不只說「成功」「失敗」或「出現敵人」。
+
+細節必須服務氣氛、空間理解、壓力與玩家選擇，並以劇本、canon 和已保存狀態為準；命名、可重用或會影響後續的新增細節仍須先持久化。詳細敘事只擴充 GM 控制的世界與 NPC，不授權 GM 替任何玩家角色補寫思想、情緒、台詞、移動、決定或反應。`trpg_turn_finalize` 因此要求 `narrativeDetailChecked=true`，確認 gameplay 回覆已達到這項標準。
 
 ### 創角後優先引導故事開場
 
@@ -395,11 +401,12 @@ Extension 另提供 `trpg_turn_finalize` 工具。Agent 必須在所有狀態操
 - 宣稱保存了狀態，但實際未觀察到成功的 mutation。
 - 執行判定後既未保存後果，也沒有合理的 `noStateChangeReason`，或判定之前沒有已接受的行動裁定。
 - 沒有確認 player-facing 回覆已排除 GM secret。
+- 沒有以 `narrativeDetailChecked=true` 確認 gameplay 回覆已準備小說式的空間、感官、世界活動與事件變化細節。
 - 沒有確認玩家角色的額外決策仍交給玩家。
 
 `trpg_turn_finalize` 的 `turnKind` 通常使用 `gameplay`。若 Skill 正在詢問「新團或舊團」、room-id、劇本或角色等缺少資訊，可使用 `clarification`，並在 `noStateChangeReason` 說明正在等待哪一項玩家輸入；已經擲骰或寫入狀態的回合不能藉此跳過驗證。
 
-這是一個流程 guard，不是安全邊界或完整的故事內容審查器。它無法從自然語言百分之百判斷一條新線索是否漏存，而且 `agent_settled` 發生在模型產生回覆之後：follow-up 可以要求修正，但不能撤回已經串流到前端的文字。秘密資訊仍必須由 Skill 規範與模型遵守；結構化 finalization、SQLite 事件紀錄及人工監督應共同使用。
+這是一個流程 guard，不是安全邊界或完整的故事內容審查器。`narrativeDetailChecked` 是模型在輸出前的強制自我確認，無法直接量測最終自然語言的文學性或詳細程度；它也無法百分之百判斷一條新線索是否漏存。`agent_settled` 發生在模型產生回覆之後：follow-up 可以要求修正，但不能撤回已經串流到前端的文字。秘密資訊、敘事品質與持久化完整性仍必須由 Skill 規範與模型遵守；結構化 finalization、SQLite 事件紀錄、production-like E2E 及人工監督應共同使用。
 
 ## Python 負責什麼
 

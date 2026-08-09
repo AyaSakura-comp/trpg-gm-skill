@@ -146,6 +146,45 @@ test("skill protocol requires player-facing reports for every check", async () =
   assert.match(skill, /其他玩家角色.*說話|不得替.*其他.*玩家角色.*說話/s);
 });
 
+test("skill protocol requires novel-like detailed world narration", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  const protocol = await readFile(new URL("../.agents/skills/trpg-gm/references/GM_PROTOCOL.md", import.meta.url), "utf8");
+  const guidance = skill + protocol;
+  assert.match(guidance, /小說/);
+  assert.match(guidance, /感官|視覺.*聲音.*氣味/s);
+  assert.match(guidance, /空間|位置/);
+  assert.match(guidance, /場景.*變化|事物.*發生/s);
+  assert.match(guidance, /不得.*玩家角色.*反應|不可.*玩家角色.*反應/s);
+});
+
+test("finalizer requires an explicit detailed-narration confirmation", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const finalizer = pi.tools.get("trpg_turn_finalize");
+  assert.ok(finalizer.parameters.required.includes("narrativeDetailChecked"));
+  assert.equal(finalizer.parameters.properties.narrativeDetailChecked.type, "boolean");
+  const baseParams = {
+    turnKind: "gameplay",
+    roomId: "room-a",
+    playerActionStatus: "not_applicable",
+    noPlayerActionReason: "場景建立，尚無玩家行動",
+    stateChanges: [],
+    secretsChecked: true,
+    playerAgencyChecked: true,
+  };
+  await assert.rejects(
+    () => finalizer.execute("missing-detail-check", baseParams),
+    /detailed|detail|詳細|小說/i,
+  );
+  await assert.rejects(
+    () => finalizer.execute("detail-check", {
+      ...baseParams,
+      narrativeDetailChecked: false,
+    }),
+    /detailed|detail|詳細|小說/i,
+  );
+});
+
 test("skill protocol requires persisted action adjudication outside the prompt", async () => {
   const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
   const cliReference = await readFile(new URL("../.agents/skills/trpg-gm/references/CLI.md", import.meta.url), "utf8");
@@ -217,7 +256,7 @@ test("finalizer requires progress assessment and forced intervention after three
   await assert.rejects(
     pi.tools.get("trpg_turn_finalize").execute("finalize", {
       turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
-      stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+      stateChanges: [], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /record whether.*advanced or stalled/i,
   );
@@ -234,7 +273,7 @@ test("finalizer requires progress assessment and forced intervention after three
   await assert.rejects(
     pi.tools.get("trpg_turn_finalize").execute("finalize", {
       turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
-      stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+      stateChanges: [], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /introduce.*event/i,
   );
@@ -253,7 +292,7 @@ test("finalizer requires progress assessment and forced intervention after three
   await pi.tools.get("trpg_turn_finalize").execute("finalize", {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
     stateChanges: ["地下室暗門已由突發事件打開"],
-    secretsChecked: true, playerAgencyChecked: true,
+    secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   });
 });
 
@@ -285,7 +324,7 @@ test("progress recorded before the current action cannot assess that new action"
   await assert.rejects(
     pi.tools.get("trpg_turn_finalize").execute("finalize", {
       turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
-      stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+      stateChanges: [], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /record whether.*advanced or stalled/i,
   );
@@ -457,7 +496,7 @@ test("availability changes refresh finalizer spotlight eligibility", async () =>
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "not_applicable",
     noPlayerActionReason: "場景狀態更新，沒有玩家角色行動",
     stateChanges: ["鮑伯目前昏迷，無法行動"],
-    secretsChecked: true, playerAgencyChecked: true,
+    secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   });
 });
 
@@ -488,7 +527,7 @@ test("HP depletion refreshes finalizer spotlight eligibility", async () => {
 
   await pi.tools.get("trpg_turn_finalize").execute("finalize", {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
-    stateChanges: ["鮑伯 HP 降至 0"], secretsChecked: true, playerAgencyChecked: true,
+    stateChanges: ["鮑伯 HP 降至 0"], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   });
 });
 
@@ -540,7 +579,7 @@ test("dedicated gameplay tools build exact CLI calls and share turn tracking", a
   ]);
   const result = await pi.tools.get("trpg_turn_finalize").execute("finalize", {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
-    stateChanges: ["保存門縫纖維"], secretsChecked: true, playerAgencyChecked: true,
+    stateChanges: ["保存門縫纖維"], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/);
 });
@@ -603,7 +642,7 @@ test("guardrail additions are tracked as persistent room mutations", async () =>
     noPlayerActionReason: "本回合只設定劇本禁止條款",
     stateChanges: ["已保存劇本禁止條款"],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/);
 });
@@ -634,7 +673,7 @@ test("structured Pi CLI tool tracks successful context without shell parsing", a
     noPlayerActionReason: "此測試只驗證 room context",
     stateChanges: [],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/i);
 });
@@ -652,7 +691,7 @@ test("context tracking accepts options before the room positional", async () => 
   const result = await pi.tools.get("trpg_turn_finalize").execute("context-options", {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "not_applicable",
     noPlayerActionReason: "本回合只查看狀態", stateChanges: [],
-    secretsChecked: true, playerAgencyChecked: true,
+    secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/);
 });
@@ -687,7 +726,7 @@ test("action tracking accepts argparse options before positionals", async () => 
     playerActionStatus: "accepted",
     stateChanges: [],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/);
 });
@@ -718,7 +757,7 @@ test("action tracking handles inline argparse option assignments", async () => {
 
   const result = await pi.tools.get("trpg_turn_finalize").execute("inline-options", {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
-    stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+    stateChanges: [], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/);
 });
@@ -741,7 +780,7 @@ test("setup mutations before a rejected action do not count as its consequences"
 
   const result = await pi.tools.get("trpg_turn_finalize").execute("setup-then-reject", {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "rejected",
-    stateChanges: ["已保存劇本禁止條款"], secretsChecked: true, playerAgencyChecked: true,
+    stateChanges: ["已保存劇本禁止條款"], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/);
 });
@@ -782,7 +821,7 @@ test("finalizer rejects a turn without context or persisted state accounting", a
       noPlayerActionReason: "尚未進入可執行玩家行動的 room",
       stateChanges: [],
       secretsChecked: true,
-      playerAgencyChecked: true,
+      playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /context/,
   );
@@ -799,7 +838,7 @@ test("finalizer rejects a turn without context or persisted state accounting", a
       playerActionStatus: "accepted",
       stateChanges: [],
       secretsChecked: true,
-      playerAgencyChecked: true,
+      playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /state change|noStateChangeReason/i,
   );
@@ -832,7 +871,7 @@ test("finalizer requires the least-participating eligible player as next spotlig
   const base = {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
     stateChanges: [], noStateChangeReason: "行動不需擲骰且沒有改變既有狀態",
-    secretsChecked: true, playerAgencyChecked: true,
+    secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   };
 
   await assert.rejects(() => finalize.execute("finalize", base), /nextSpotlightCharacterId/);
@@ -868,7 +907,7 @@ test("successful finalization prevents follow-up reminders", async () => {
     playerActionStatus: "accepted",
     stateChanges: ["保存已發現線索 c1"],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/i);
 
@@ -900,7 +939,7 @@ test("structured CLI preserves shell operators inside argument values", async ()
     noPlayerActionReason: "GM 保存既有場景資料，沒有玩家宣告行動",
     stateChanges: ["保存包含標點的線索"],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/i);
 });
@@ -941,7 +980,7 @@ test("successful CLI help output does not poison room tracking", async () => {
     noPlayerActionReason: "CLI help 不代表玩家行動",
     stateChanges: [],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   assert.match(result.content[0].text, /validated/i);
 });
@@ -1011,7 +1050,7 @@ test("character creation proposals are tracked and rejected concepts report reas
     noPlayerActionReason: "此回合正在進行開團捏角，沒有遊戲內角色行動",
     stateChanges: ["保存被拒絕的角色提案"],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   const amended = await pi.handlers.get("message_end")({
     message: { role: "assistant", content: [{ type: "text", text: "請調整角色設定。" }] },
@@ -1086,7 +1125,7 @@ test("character generation reports rolled skill values and resource maxima", asy
     noPlayerActionReason: "此回合正在捏角，沒有遊戲內角色行動",
     stateChanges: ["生成角色技能與 HP/MP/SAN 上限"],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   const amended = await pi.handlers.get("message_end")({
     message: { role: "assistant", content: [{ type: "text", text: "角色建立完成。" }] },
@@ -1127,7 +1166,7 @@ test("character generation requires story-background guidance before finalizatio
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "not_applicable",
     noPlayerActionReason: "創角完成，尚未進入角色行動",
     stateChanges: ["生成角色並準備故事開場"],
-    secretsChecked: true, playerAgencyChecked: true,
+    secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   };
 
   await assert.rejects(() => finalizer.execute("before-opening", params), /story background|故事背景/i);
@@ -1297,7 +1336,7 @@ test("player actions require persisted adjudication and rejected actions report 
       playerActionStatus: "accepted",
       stateChanges: [],
       secretsChecked: true,
-      playerAgencyChecked: true,
+      playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /action|adjudicat|裁定/i,
   );
@@ -1327,7 +1366,7 @@ test("player actions require persisted adjudication and rejected actions report 
     playerActionStatus: "rejected",
     stateChanges: [],
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
   const amended = await pi.handlers.get("message_end")({
     message: {
@@ -1432,7 +1471,7 @@ test("final player-facing answer reports every resolved check canonically", asyn
     stateChanges: [],
     noStateChangeReason: "判定只決定玩家當下察覺程度，沒有建立持久狀態",
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
 
   const amended = await pi.handlers.get("message_end")({
@@ -1523,7 +1562,7 @@ test("failed structured CLI calls do not satisfy context tracking", async () => 
       noPlayerActionReason: "context 載入失敗，尚未處理玩家行動",
       stateChanges: [],
       secretsChecked: true,
-      playerAgencyChecked: true,
+      playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /context/,
   );
@@ -1547,7 +1586,7 @@ test("gameplay finalization rejects a different room than the loaded context", a
       noPlayerActionReason: "此測試只驗證 room 一致性",
       stateChanges: [],
       secretsChecked: true,
-      playerAgencyChecked: true,
+      playerAgencyChecked: true, narrativeDetailChecked: true,
     }),
     /room-a|room-b|exact room/i,
   );
@@ -1570,7 +1609,7 @@ test("clarification finalization can ask for a room without loading context", as
     stateChanges: [],
     noStateChangeReason: "等待玩家選擇新團或舊團與 room id",
     secretsChecked: true,
-    playerAgencyChecked: true,
+    playerAgencyChecked: true, narrativeDetailChecked: true,
   });
 
   assert.match(result.content[0].text, /clarification/i);
