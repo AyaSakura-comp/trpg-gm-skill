@@ -51,3 +51,25 @@ The p1 retest then loaded context, persisted rejection, finalized successfully, 
 ## Scope and limitation
 
 Guardrails are deterministic for configured aliases after Unicode NFKC/case normalization and removal of whitespace/punctuation. They cannot infer every novel semantic paraphrase. Scenario setup must therefore add meaningful aliases without using overly broad fragments; unmatched creative language still goes through normal GM semantic adjudication against scenario, canon, character capabilities, scene, and rules.
+
+## Typed-tool regression from the 30-turn investigation
+
+A later long-form run in `/tmp/qwen-mtp-trpg-30turn-v06/` exposed repeated raw-token mistakes: omitted `action adjudicate`, invalid decision values, missing entity names, malformed JSON, stale scene `turn` values, and model-invented explicit d100 rolls. The hardening added:
+
+- one successful action adjudication per turn and exact player-wording enforcement;
+- typed gameplay tools for context, adjudication, checks, entities, resources, canon, and recaps;
+- random checks that reject explicit `roll` values unless the player supplied that value;
+- non-negative integer, monotonic `entity.state.turn`, preventing stale or type-changing writes from rewinding chronology;
+- pre-persistence gates: context must load first, checks and gameplay mutations require an accepted action, and rejected actions cannot mutate state;
+- exact room and canonical DB-path matching across every operation in a turn;
+- blocking direct room-database access and `file://` web-tool reads;
+- explicit-roll binding to an unambiguous player-declared roll phrase rather than any incidental number;
+- explicit guidance that recap is session-scoped, not an every-turn mutation.
+
+Production-like Qwen evidence:
+
+- `e2e-turn18.jsonl` reproduced two raw CLI shape errors and an invented explicit roll before typed tools were added.
+- `e2e-turn19.jsonl` reproduced a malformed context event count, missing entity name, wrong room argument, and mutable-state misuse of canon.
+- `e2e-turn20.jsonl`, after typed tools, completed with `read → trpg_gm_context → trpg_gm_action_adjudicate → trpg_gm_check → trpg_gm_entity_upsert → trpg_turn_finalize`, with zero failed tool calls, a core-generated random roll, no every-turn recap, and a monotonic scene update from turn 18 to 20.
+
+This targeted regression proves the CLI trial-and-error path was removed for the tested gameplay operations. It does not yet claim that the separate adaptive 30-turn continuous-session playtest is complete.

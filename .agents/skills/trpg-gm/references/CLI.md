@@ -167,4 +167,4 @@ $GM --db "$DB" entity my-room npc caretaker '老管理員' \
   --state '{"status":"alive","location":"old-library","attitude":"wary","secret":"has-key"}'
 ```
 
-`entity` is a merge-upsert: supplied keys replace matching keys while unspecified fields are preserved. This prevents accidental loss of secrets or other state when an agent updates only one field. There is currently no CLI operation for deleting a state key. Secret values belong in DB context but must not be exposed until discovered.
+`entity` is a merge-upsert: supplied keys replace matching keys while unspecified fields are preserved. This prevents accidental loss of secrets or other state when an agent updates only one field. If both the stored state and update contain an integer `turn`, the new value cannot be lower; stale updates fail with `entity state turn cannot move backwards` instead of rewinding chronology. There is currently no CLI operation for deleting a state key. Secret values belong in DB context but must not be exposed until discovered.

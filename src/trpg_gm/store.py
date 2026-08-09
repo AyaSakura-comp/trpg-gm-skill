@@ -789,6 +789,24 @@ class GameStore:
                 (room_id, kind, entity_id),
             ).fetchone()
             merged_state = json.loads(existing["state_json"]) if existing else {}
+            previous_turn = merged_state.get("turn")
+            next_turn = state.get("turn")
+            if "turn" in state and (
+                not isinstance(next_turn, int)
+                or isinstance(next_turn, bool)
+                or next_turn < 0
+            ):
+                raise ValueError("entity state turn must be a non-negative integer")
+            if (
+                isinstance(previous_turn, int)
+                and not isinstance(previous_turn, bool)
+                and isinstance(next_turn, int)
+                and not isinstance(next_turn, bool)
+                and next_turn < previous_turn
+            ):
+                raise ValueError(
+                    f"entity state turn cannot move backwards: {next_turn} < {previous_turn}"
+                )
             merged_state.update(state)
             db.execute(
                 """INSERT INTO entities(room_id, kind, id, name, state_json) VALUES (?, ?, ?, ?, ?)

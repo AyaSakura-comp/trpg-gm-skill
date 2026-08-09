@@ -105,6 +105,7 @@ test("skill protocol requires player-facing reports for every check", async () =
   assert.match(skill, /roll/);
   assert.match(skill, /目標值/);
   assert.match(skill, /成功等級/);
+  assert.match(skill, /其他玩家角色.*說話|不得替.*其他.*玩家角色.*說話/s);
 });
 
 test("skill protocol requires persisted action adjudication outside the prompt", async () => {
@@ -129,9 +130,101 @@ test("skill protocol documents persistent world-aware character creation", async
 test("skill protocol requires immutable persistent guardrails before adversarial play", async () => {
   const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
   const cliReference = await readFile(new URL("../.agents/skills/trpg-gm/references/CLI.md", import.meta.url), "utf8");
-  for (const phrase of ["guardrail add", "forbidden_terms", "不可覆寫", "context"]) {
+  for (const phrase of ["guardrail add", "forbidden_terms", "不可覆寫", "context", "同一回合只能保存一次行動裁定"]) {
     assert.match(skill + cliReference, new RegExp(phrase));
   }
+});
+
+test("skill gives Pi exact structured tool calls and action decision enum", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /Pi 結構化工具速查/);
+  assert.match(skill, /decision.*只能.*accepted.*rejected/s);
+  assert.match(skill, /JSON.*args.*單一字串/s);
+  assert.match(skill, /不存在.*show.*state.*list.*upsert.*resolve/s);
+  assert.match(skill, /不要每回合.*recap|recap.*不是每回合/s);
+  for (const tool of ["trpg_gm_context", "trpg_gm_action_adjudicate", "trpg_gm_check", "trpg_gm_entity_upsert"]) {
+    assert.match(skill, new RegExp(tool));
+  }
+});
+
+test("structured CLI tool description teaches action enum and exact player text", () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const description = pi.tools.get("trpg_gm_cli").description;
+  assert.match(description, /accepted.*rejected/s);
+  assert.match(description, /exact.*player.*wording/i);
+  assert.match(description, /entity.*ROOM.*KIND.*ID.*NAME/s);
+});
+
+test("dedicated gameplay tools expose typed parameters instead of raw CLI tokens", () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  for (const name of [
+    "trpg_gm_context", "trpg_gm_action_adjudicate", "trpg_gm_check",
+    "trpg_gm_entity_upsert", "trpg_gm_character_adjust", "trpg_gm_canon_set",
+    "trpg_gm_recap_save",
+  ]) {
+    assert.ok(pi.tools.has(name), `${name} must be registered`);
+  }
+  assert.deepEqual(
+    pi.tools.get("trpg_gm_action_adjudicate").parameters.properties.decision.enum,
+    ["accepted", "rejected"],
+  );
+  assert.equal(
+    pi.tools.get("trpg_gm_entity_upsert").parameters.properties.state.type,
+    "object",
+  );
+});
+
+test("dedicated gameplay tools build exact CLI calls and share turn tracking", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我仔細檢查門縫", source: "interactive" },
+    ctx,
+  );
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.sqlite3", room: "room-a", events: 30,
+  });
+
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      character_id: "pc", action: "我仔細檢查門縫", decision: "accepted",
+      basis: "scene:door", reason: "角色可以接近門縫",
+    }),
+    stderr: "", killed: false,
+  };
+  await pi.tools.get("trpg_gm_action_adjudicate").execute("action", {
+    db: "/tmp/game.sqlite3", room: "room-a", character: "pc",
+    action: "我仔細檢查門縫", decision: "accepted",
+    basis: "scene:door", reason: "角色可以接近門縫",
+  });
+
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    character_id: "pc", stat: "偵查", roll: 31, target: 60, degree: "success",
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_check").execute("check", {
+    db: "/tmp/game.sqlite3", room: "room-a", character: "pc", stat: "偵查",
+  });
+  pi.execResult = { code: 0, stdout: '{"ok":true}', stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_entity_upsert").execute("entity", {
+    db: "/tmp/game.sqlite3", room: "room-a", kind: "clue", id: "fiber",
+    name: "門縫纖維", state: { discovered: true, turn: 3 },
+  });
+
+  assert.deepEqual(pi.execCalls.map((call) => call.args.slice(2)), [
+    ["context", "room-a", "--events", "30"],
+    ["action", "adjudicate", "room-a", "pc", "我仔細檢查門縫", "--decision", "accepted", "--basis", "scene:door", "--reason", "角色可以接近門縫"],
+    ["check", "room-a", "pc", "偵查"],
+    ["entity", "room-a", "clue", "fiber", "門縫纖維", "--state", '{"discovered":true,"turn":3}'],
+  ]);
+  const result = await pi.tools.get("trpg_turn_finalize").execute("finalize", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+    stateChanges: ["保存門縫纖維"], secretsChecked: true, playerAgencyChecked: true,
+  });
+  assert.match(result.content[0].text, /validated/);
 });
 
 test("activation recognizes gameplay but ignores development prompts", () => {
@@ -159,6 +252,8 @@ test("active guard injects a checklist and follows up once when finalization is 
   assert.match(injection.message.content, /trpg_turn_finalize/);
   assert.match(injection.message.content, /context/);
   assert.match(injection.message.content, /guardrail/);
+  assert.match(injection.message.content, /\["action","adjudicate",ROOM,CHARACTER,PLAYER_ACTION/);
+  assert.match(injection.message.content, /\["entity",ROOM,KIND,ID,NAME/);
 
   await pi.handlers.get("agent_settled")({}, ctx);
   await pi.handlers.get("agent_settled")({}, ctx);
@@ -249,7 +344,7 @@ test("action tracking accepts argparse options before positionals", async () => 
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 繼續遊戲，我要調查門縫", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -283,7 +378,7 @@ test("action tracking handles inline argparse option assignments", async () => {
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 繼續遊戲，我要調查門縫", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -313,7 +408,7 @@ test("setup mutations before a rejected action do not count as its consequences"
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 開新團", source: "interactive" },
+    { text: "/skill:trpg-gm 開新團；玩家宣告：施法開門", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -354,7 +449,7 @@ test("finalizer rejects a turn without context or persisted state accounting", a
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 繼續遊戲，我要調查門縫", source: "interactive" },
     ctx,
   );
   const finalizer = pi.tools.get("trpg_turn_finalize");
@@ -394,7 +489,7 @@ test("successful finalization prevents follow-up reminders", async () => {
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "我要繼續 TRPG", source: "interactive" },
+    { text: "我要繼續 TRPG，並調查門縫", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -430,7 +525,7 @@ test("structured CLI preserves shell operators inside argument values", async ()
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 開新團並建立初始線索", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -637,12 +732,140 @@ test("character generation reports rolled skill values and resource maxima", asy
   assert.match(text, /SAN.*roll 1.*46/);
 });
 
-test("player actions require persisted adjudication and rejected actions report reasons", async () => {
+test("action adjudication must preserve the player's exact wording", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "林雨晴宣告：我仔細檢查門廳書桌抽屜與桌面。", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+
+  await assert.rejects(
+    runAction(pi, { action: "調查書桌尋找線索" }),
+    /copy the exact contiguous player wording/i,
+  );
+  assert.equal(pi.execCalls.length, 1);
+
+  await runAction(pi, { action: "我仔細檢查門廳書桌抽屜與桌面。" });
+  assert.equal(pi.execCalls.length, 2);
+});
+
+test("invalid action decisions fail before invoking the CLI", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我調查門縫", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+
+  await assert.rejects(
+    runCli(pi, [
+      "action", "adjudicate", "room-a", "pc", "我調查門縫",
+      "--decision", "investigation_check", "--basis", "scene", "--reason", "合理",
+    ]),
+    /decision must be exactly accepted or rejected/i,
+  );
+  assert.equal(pi.execCalls.length, 1);
+});
+
+test("explicit check rolls require a player-provided roll", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我要調查門縫", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+
+  await assert.rejects(
+    runCli(pi, ["check", "room-a", "pc", "觀察", "--roll", "50"]),
+    /omit --roll.*random d100/i,
+  );
+  assert.equal(pi.execCalls.length, 1);
+
+  await pi.handlers.get("input")(
+    { text: "我有 20 枚硬幣，要調查門縫", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await assert.rejects(
+    runCli(pi, ["check", "room-a", "pc", "觀察", "--roll", "20"]),
+    /player.*roll|玩家.*骰|omit --roll/i,
+  );
+  assert.equal(pi.execCalls.length, 2);
+
+  await pi.handlers.get("input")(
+    { text: "我調查門縫；我的實體骰結果是 20", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runAction(pi, { action: "我調查門縫" });
+  await runCli(pi, ["check", "room-a", "pc", "觀察", "--roll", "20"]);
+  assert.equal(pi.execCalls.length, 5);
+});
+
+test("a rejected adjudication cannot be rewritten and accepted in the same turn", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲；詢問周管理員", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runAction(pi, { decision: "rejected", action: "詢問周管理員" });
+
+  await assert.rejects(
+    runAction(pi, { decision: "accepted", action: "詢問負責看守莊園的男性" }),
+    /only one successful action adjudication/i,
+  );
+});
+
+test("direct SQLite access through bash is blocked after loading a room DB", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
     { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+
+  for (const event of [
+    {
+      toolName: "bash",
+      input: { command: "python3 -c 'import sqlite3; sqlite3.connect(\"/tmp/game.sqlite3\")'" },
+    },
+    { toolName: "bash", input: { command: "cp /tmp/other.sqlite3 /tmp/backup" } },
+    { toolName: "read", input: { path: "/tmp/game.sqlite3" } },
+    { toolName: "browser", input: { command: "open file:///tmp/scenario.md" } },
+  ]) {
+    const result = await pi.handlers.get("tool_call")(event);
+    assert.equal(result.block, true);
+    assert.match(result.reason, /trpg_gm_cli|read tool/);
+  }
+
+  const harmless = await pi.handlers.get("tool_call")({
+    toolName: "read", input: { path: "/tmp/scenario.md" },
+  });
+  assert.equal(harmless, undefined);
+  const harmlessDocsCommand = await pi.handlers.get("tool_call")({
+    toolName: "bash", input: { command: "echo 'SQLite documentation test'" },
+  });
+  assert.equal(harmlessDocsCommand, undefined);
+});
+
+test("player actions require persisted adjudication and rejected actions report reasons", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲；宣稱自己有翅膀並飛過鎖門", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -701,51 +924,38 @@ test("player actions require persisted adjudication and rejected actions report 
   assert.match(text, /角色卡與劇本均未建立飛行能力/);
 });
 
-test("an accepted action cannot retroactively authorize an earlier check", async () => {
+test("a check cannot execute before an accepted action", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 繼續遊戲，我要調查門縫", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
-  await runCli(pi, ["check", "room-a", "pc", "觀察"]);
-  await runAction(pi);
 
   await assert.rejects(
-    () => pi.tools.get("trpg_turn_finalize").execute("late-action", {
-      turnKind: "gameplay",
-      roomId: "room-a",
-      playerActionStatus: "accepted",
-      stateChanges: [],
-      noStateChangeReason: "判定沒有建立持久狀態",
-      secretsChecked: true,
-      playerAgencyChecked: true,
-    }),
-    /before|earlier|先.*行動|順序/i,
+    runCli(pi, ["check", "room-a", "pc", "觀察"]),
+    /accepted.*action|action.*accepted/i,
   );
+  assert.equal(pi.execCalls.length, 1, "rejected check must not reach persistent CLI");
 });
 
-test("mutations before a rejected action cannot be disguised as setup", async () => {
+test("gameplay mutations cannot execute before an accepted action", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 繼續遊戲；要求生命值增加", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
-  await runCli(pi, ["character", "adjust", "room-a", "pc", "hp", "99", "--reason", "違規行動效果"]);
-  await runAction(pi, { decision: "rejected", action: "要求生命值增加" });
 
   await assert.rejects(
-    pi.tools.get("trpg_turn_finalize").execute("pre-rejection-mutation", {
-      turnKind: "gameplay", roomId: "room-a", playerActionStatus: "rejected",
-      stateChanges: ["生命值增加"], secretsChecked: true, playerAgencyChecked: true,
-    }),
-    /rejected player action/i,
+    runCli(pi, ["character", "adjust", "room-a", "pc", "hp", "99", "--reason", "違規行動效果"]),
+    /accepted.*action|action.*accepted/i,
   );
+  assert.equal(pi.execCalls.length, 1, "rejected mutation must not reach persistent CLI");
 });
 
 test("rejected player actions cannot produce checks or world-state mutations", async () => {
@@ -753,7 +963,7 @@ test("rejected player actions cannot produce checks or world-state mutations", a
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 繼續遊戲；徒手穿過實心牆", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -763,19 +973,11 @@ test("rejected player actions cannot produce checks or world-state mutations", a
     basis: "目前場景的牆是完整實體，角色沒有超自然穿牆能力",
     reason: "這個行動在目前設定下不可能",
   });
-  await runCli(pi, ["entity", "room-a", "scene", "wall", "牆後", "--state", "{}"]);
-
   await assert.rejects(
-    () => pi.tools.get("trpg_turn_finalize").execute("rejected-mutation", {
-      turnKind: "gameplay",
-      roomId: "room-a",
-      playerActionStatus: "rejected",
-      stateChanges: ["角色穿過牆壁"],
-      secretsChecked: true,
-      playerAgencyChecked: true,
-    }),
-    /rejected|拒絕|must not/i,
+    runCli(pi, ["entity", "room-a", "scene", "wall", "牆後", "--state", "{}"]),
+    /accepted.*action|rejected.*action|action.*accepted/i,
   );
+  assert.equal(pi.execCalls.length, 2, "mutation after rejection must not reach persistent CLI");
 });
 
 test("final player-facing answer reports every resolved check canonically", async () => {
@@ -783,7 +985,7 @@ test("final player-facing answer reports every resolved check canonically", asyn
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    { text: "/skill:trpg-gm 繼續遊戲，我要調查門縫", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
@@ -829,6 +1031,57 @@ test("final player-facing answer reports every resolved check canonically", asyn
   assert.match(text, /hard/);
   assert.match(text, /roll 27/);
   assert.match(text, /目標 60/);
+});
+
+test("player action resolution cannot execute before context", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 我調查門縫", source: "interactive" },
+    ctx,
+  );
+
+  await assert.rejects(
+    runAction(pi, { action: "我調查門縫" }),
+    /load.*context|context.*first/i,
+  );
+  assert.equal(pi.execCalls.length, 0);
+});
+
+test("all turn operations must use the same database as context", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 我調查門縫", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"], "/tmp/a.sqlite3");
+
+  await assert.rejects(
+    runAction(pi, { action: "我調查門縫" }),
+    /same database|context database/i,
+  );
+  assert.equal(pi.execCalls.length, 1);
+});
+
+test("turn operations for a different room fail before persistence", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 我調查門縫", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runAction(pi, { action: "我調查門縫" });
+
+  await assert.rejects(
+    runCli(pi, ["entity", "room-b", "clue", "fiber", "纖維", "--state", "{}"]),
+    /exact room|same room|room-a/i,
+  );
+  assert.equal(pi.execCalls.length, 2);
 });
 
 test("failed structured CLI calls do not satisfy context tracking", async () => {

@@ -19,7 +19,37 @@ cd <directory-containing-this-SKILL.md>
 
 預設建議每個遊戲 room 使用獨立資料庫：`<workspace>/.trpg/rooms/<room-id>.sqlite3`。`room-id` 必須取自目前 Discord channel/thread、web room 或使用者明確指定的名稱；不確定時先問，絕不能猜到別的 room。
 
-完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。若 Pi 環境提供 `trpg_gm_cli`，所有 TRPG 狀態操作都必須改用這個結構化工具，不要使用 bash wrapper：將 DB 路徑傳入 `db`，並將原本 `--db` 之後的每個 CLI token 依序放入 `args`，例如 `{"db":".trpg/rooms/demo.sqlite3","args":["context","demo"]}`。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
+完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。Pi 環境若提供 typed gameplay tools，必須優先使用 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_canon_set` 與 `trpg_gm_recap_save`；它們直接接收命名欄位與 JSON object，可避免漏掉 subcommand、room、name 或產生壞 JSON。只有 typed tools 尚未涵蓋的 setup／查詢操作才使用 `trpg_gm_cli`。所有 Pi TRPG 狀態操作都不得使用 bash wrapper。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
+
+### Pi 結構化工具速查
+
+Typed gameplay tools 的正確用法：
+
+```text
+trpg_gm_context           {db, room, events?}
+trpg_gm_action_adjudicate {db, room, character, action, decision, basis, reason}
+trpg_gm_check             {db, room, character, stat, roll?}
+trpg_gm_entity_upsert     {db, room, kind, id, name, state}
+trpg_gm_character_adjust  {db, room, character, resource, delta, reason}
+trpg_gm_canon_set         {db, room, key, value, source}
+trpg_gm_recap_save        {db, room, summary, state}
+```
+
+其中 `state` 是 JSON object，不是自行序列化的字串。只有使用 raw `trpg_gm_cli` fallback 時，才直接照下列 token 形狀呼叫，**不要猜子命令或 option**。大寫名稱代表要替換的值，不是字面文字：
+
+```text
+讀狀態： ["context",ROOM,"--events","30"]
+裁定：   ["action","adjudicate",ROOM,CHARACTER,PLAYER_ACTION,"--decision","accepted","--basis",BASIS,"--reason",REASON]
+判定：   ["check",ROOM,CHARACTER,STAT]                         # 隨機 d100
+指定骰： ["check",ROOM,CHARACTER,STAT,"--roll","20"]
+狀態：   ["entity",ROOM,KIND,ID,NAME,"--state",STATE_JSON]
+資源：   ["character","adjust",ROOM,CHARACTER,"hp","-2","--reason",REASON]
+canon：  ["canon",ROOM,KEY,VALUE,"--source",SOURCE]
+recap：  ["recap","save",ROOM,"--summary",SUMMARY,"--state",STATE_JSON]
+事件：   ["events",ROOM]
+```
+
+`action adjudicate` 的 `decision` 只能是 `accepted` 或 `rejected`；`check` 不是 decision，而是 accepted 後的下一個獨立 call。`PLAYER_ACTION` 必須逐字複製玩家輸入中的完整連續文字，不可摘要、翻譯或改寫。隨機 d100 判定不要提供 `--roll`；只有玩家明確給出實體骰值或測試要求指定骰值時才可使用。`STATE_JSON` 等 JSON 值在 `args` 中必須是單一字串，例如 `"{\"status\":\"open\",\"turn\":4}"`，不可傳成物件，也不要加入 shell quotes。`entity` 一定需要 `ROOM,KIND,ID,NAME` 四個 positional values；更新既有 entity 仍要提供原本名稱。不存在 `room show`、`room state`、`character list`、`entity upsert`、`check resolve` 等 `show/state/list/upsert/resolve` 猜測用法。不要每回合保存 recap；recap 只在開團建立初始快照、自然 session 停點或玩家明確要求暫停／收尾時保存。
 
 ## 遊戲入口：新團或舊團
 
@@ -61,7 +91,9 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 
 用 `guardrail add` 保存劇本明確禁止的角色設定與行動。每條包含穩定 ID、`character`/`action` scopes、玩家安全的規則敘述、來源，以及 `forbidden_terms`。terms 應涵蓋劇本用詞、常見同義詞與中英文別名，例如「瞬間移動／傳送／teleport」；CLI 會做 Unicode、大小寫、空白與標點正規化，所以「瞬 間 移 動」仍會命中。禁止條款不可覆寫；需要 retcon 時必須建立新的明確版本並經玩家同意，不能修改舊條款。
 
-`creation propose` 和 `action adjudicate` 會在 SQLite 層檢查 guardrails。命中時，即使模型要求 `accepted`，實際保存結果仍強制為 `rejected`，並記錄 `requested_decision` 與 `enforced_guardrails`。這是針對已列 aliases 的確定性防線；沒有列入的全新語意改寫仍需 GM 對照劇本裁定，因此開團時應建立足夠完整但不過度寬泛的 aliases。
+`creation propose` 和 `action adjudicate` 會在 SQLite 層檢查 guardrails。命中時，即使模型要求 `accepted`，實際保存結果仍強制為 `rejected`，並記錄 `requested_decision` 與 `enforced_guardrails`。這是針對已列 aliases 的確定性防線；沒有列入的全新語意改寫仍需 GM 對照劇本裁定，因此開團時應建立足夠完整但不過度寬泛的 aliases。命中後不得改寫玩家原句或提交第二份裁定來規避拒絕；同一回合只能保存一次行動裁定。
+
+Pi gameplay 中不得透過 bash、Python `sqlite3` 或其他通用工具讀寫 room DB；所有 TRPG 狀態操作只能使用結構化 `trpg_gm_cli`。劇本文字可用 read 工具讀取，不可把本機 `file://` 路徑交給網頁工具。
 
 ## 持久化捏角流程
 
@@ -76,7 +108,7 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 
 ## 不可違反
 
-- 不替玩家角色說話、思考、移動、消耗資源或做關鍵決策；只有玩家已明確宣告的行動例外。
+- 不替玩家角色說話、思考、移動、反應、消耗資源或做關鍵決策；只有該玩家已明確宣告的行動例外。這也包含同隊的其他玩家角色：GM 不得替其他玩家角色說話、補台詞、走近查看、點頭、皺眉或提供反應。
 - 不揭露角色無法得知的秘密、未發現線索、NPC 真實動機或劇本幕後內容。
 - 不因想推劇情就讓檢定自動成功、讓失敗卡死主線，或憑空回收已發生的後果。
 - 不可跳過 `action adjudicate` 就處理玩家行動。可以拒絕不符合設定或不可能的行動，但拒絕必須保存並說明具體原因與依據，不能用拒絕來逼玩家走唯一解法。

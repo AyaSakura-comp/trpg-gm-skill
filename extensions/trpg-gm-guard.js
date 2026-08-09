@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ACTIVATION_PATTERN = /(?:\/skill:trpg-gm|開(?:一個)?新團|繼續舊團|(?:想|要|來|開始|繼續|玩|play|start|resume).{0,24}\bTRPG\b|(?:請(?:你)?|讓你)?(?:當|作為)\s*(?:TRPG\s*)?GM\b|主持.{0,20}(?:TRPG|CoC|克蘇魯|冒險|團))/iu;
@@ -124,13 +125,21 @@ function positionalTokens(tokens) {
   return positionals;
 }
 
+function optionValue(args, name) {
+  const directIndex = args.indexOf(name);
+  if (directIndex >= 0) return args[directIndex + 1];
+  const inline = args.find((token) => token.startsWith(`${name}=`));
+  return inline?.slice(name.length + 1);
+}
+
 function classifyCliArgs(args) {
   if (args.includes("--help") || args.includes("-h")) {
     return { contextRoom: null, operationRoom: null, action: false, check: false, mutation: false };
   }
   const [command, actionOrRoom, maybeRoom] = args;
   const commandRoom = positionalTokens(args.slice(1))[0] ?? actionOrRoom;
-  const subcommandRoom = positionalTokens(args.slice(2))[0] ?? maybeRoom;
+  const subcommandPositionals = positionalTokens(args.slice(2));
+  const subcommandRoom = subcommandPositionals[0] ?? maybeRoom;
   if (command === "context") return { contextRoom: commandRoom, operationRoom: null, action: false, check: false, mutation: false };
   if (command === "creation") {
     return {
@@ -154,17 +163,40 @@ function classifyCliArgs(args) {
     };
   }
   if (command === "action" && actionOrRoom === "adjudicate") {
-    return { contextRoom: null, operationRoom: subcommandRoom, action: true, check: false, mutation: false };
+    return {
+      contextRoom: null,
+      operationRoom: subcommandRoom,
+      action: true,
+      playerAction: subcommandPositionals[2],
+      decision: optionValue(args, "--decision"),
+      check: false,
+      mutation: false,
+    };
   }
-  if (command === "check") return { contextRoom: null, operationRoom: commandRoom, action: false, check: true, mutation: false };
+  if (command === "check") {
+    return {
+      contextRoom: null,
+      operationRoom: commandRoom,
+      action: false,
+      check: true,
+      explicitRoll: optionValue(args, "--roll"),
+      mutation: false,
+    };
+  }
   if (["canon", "entity"].includes(command)) {
-    return { contextRoom: null, operationRoom: commandRoom, action: false, check: false, mutation: true };
+    return {
+      contextRoom: null, operationRoom: commandRoom, action: false, check: false,
+      mutation: true, requiresAcceptedAction: true,
+    };
   }
   if (command === "room" && actionOrRoom === "create") {
     return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
   }
   if (command === "character" && ["add", "adjust"].includes(actionOrRoom)) {
-    return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
+    return {
+      contextRoom: null, operationRoom: subcommandRoom, action: false, check: false,
+      mutation: true, requiresAcceptedAction: actionOrRoom === "adjust",
+    };
   }
   if (command === "recap" && actionOrRoom === "save") {
     return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
@@ -174,9 +206,13 @@ function classifyCliArgs(args) {
 
 function freshTurn() {
   return {
+    playerInput: "",
+    setupMode: false,
     contextLoaded: false,
     contextRoom: null,
+    contextDb: null,
     operationRooms: new Set(),
+    dbPaths: new Set(),
     operationIndex: 0,
     latestActionIndex: null,
     checkOperationIndices: [],
@@ -200,17 +236,18 @@ function freshTurn() {
 function checklist() {
   return [
     "[TRPG GM Guard — mandatory for this turn]",
-    "1. Before player-facing narration, use trpg_gm_cli to load context for the exact room and DB.",
-    "2. In Pi, use structured trpg_gm_cli calls instead of bash for every TRPG state operation.",
+    "1. Before player-facing narration, use typed trpg_gm_context to load the exact room and DB.",
+    "2. Prefer typed trpg_gm_action_adjudicate, trpg_gm_check, trpg_gm_entity_upsert, trpg_gm_character_adjust, trpg_gm_canon_set, and trpg_gm_recap_save. Use raw trpg_gm_cli only for unsupported setup/query operations; never use bash or direct SQLite. Read scenario text with read, never file:// web scraping.",
     "3. Persist every confirmed consequence, discovered clue, NPC/quest/scene change, and HP/MP/SAN change before narrating it.",
-    "4. Never expose secrets or make additional decisions for the player character.",
+    "4. Never expose secrets or narrate speech, movement, thoughts, or reactions for any player character, including non-acting party PCs.",
     "5. After all state commands finish, call trpg_turn_finalize in a separate tool round before the final player-facing answer.",
     "6. Use turnKind=clarification only when you must ask for a missing room/setup choice before gameplay; otherwise use gameplay.",
     "7. If a check caused no persistent change, explain why in noStateChangeReason; never use that field to avoid saving a discovered clue.",
     "8. Before resolving a declared player action, adjudicate it with trpg_gm_cli action adjudicate against the script, canon, rules, and established state. Reject unsupported or impossible actions with a concrete basis and reason; do not roll or mutate state for a rejected action.",
     "9. During character creation, configure scenario-grounded allowed/recommended skills and party fairness first; persist appearance, background, concept, chosen skills, and accepted/rejected ruling before rolling abilities and HP/MP/SAN maxima.",
-    "10. Read the immutable persistent guardrails returned by context before adjudication. A matching guardrail overrides an attempted acceptance to rejected; never bypass it. During setup, derive guardrail terms and paraphrase aliases from explicit scenario prohibitions with guardrail add.",
+    "10. Read the immutable persistent guardrails returned by context before adjudication. A matching guardrail overrides an attempted acceptance to rejected; never paraphrase the action or submit a second ruling to bypass it. During setup, derive guardrail terms and paraphrase aliases from explicit scenario prohibitions with guardrail add.",
     "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
+    "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
   ].join("\n");
 }
 
@@ -237,10 +274,11 @@ export default function trpgGmGuard(pi) {
 
   pi.on("input", async (event) => {
     if (event.source === "extension") return;
-    if (active || shouldActivateFromText(event.text)) {
-      activate();
-      turn = freshTurn();
-    }
+    const shouldActivate = active || shouldActivateFromText(event.text);
+    turn = freshTurn();
+    turn.playerInput = String(event.text ?? "");
+    turn.setupMode = /(?:開新團|建立新團|new campaign|campaign setup)/iu.test(turn.playerInput);
+    if (shouldActivate) activate();
   });
 
   pi.on("before_agent_start", async (event) => {
@@ -249,6 +287,7 @@ export default function trpgGmGuard(pi) {
       turn = freshTurn();
     }
     if (!active) return undefined;
+    if (!turn.playerInput) turn.playerInput = String(event.prompt ?? "");
     return {
       message: {
         customType: "trpg-gm-guard",
@@ -258,10 +297,134 @@ export default function trpgGmGuard(pi) {
     };
   });
 
+  pi.on("tool_call", async (event) => {
+    if (!active || event.toolName.startsWith("trpg_gm_") || event.toolName === "trpg_turn_finalize") {
+      return undefined;
+    }
+    const serializedInput = JSON.stringify(event.input ?? {});
+    const touchesKnownDb = [...turn.dbPaths].some((dbPath) => serializedInput.includes(dbPath));
+    const bashCommand = event.toolName === "bash" ? String(event.input?.command ?? "") : "";
+    const bashDatabaseAccess = /(?:^|[;&|]\s*)sqlite3?\s|\b(?:import|from)\s+sqlite3?\b|\bsqlite3?\.connect\s*\(|(?:^|[\s"'])[^\s"']+\.sqlite3?\b/iu
+      .test(bashCommand);
+    const nonBashDatabasePath = event.toolName !== "bash" && /\.sqlite3?\b/iu.test(serializedInput);
+    if (touchesKnownDb || bashDatabaseAccess || nonBashDatabasePath) {
+      return {
+        block: true,
+        reason: "Direct access to a TRPG room database is forbidden; use structured trpg_gm_cli commands.",
+      };
+    }
+    const webFileAccess = /^(?:browser|firecrawl|web)/iu.test(event.toolName)
+      && /file:\/\//iu.test(serializedInput);
+    if (webFileAccess) {
+      return {
+        block: true,
+        reason: "Do not use file:// with web tools; read scenario text with the read tool.",
+      };
+    }
+    return undefined;
+  });
+
+  async function executeCli(params, signal) {
+    const operation = classifyCliArgs(params.args);
+    const dbKey = resolve(params.db);
+    if (turn.contextDb && dbKey !== turn.contextDb) {
+      throw new Error(`All turn operations must use the same database as context: ${turn.contextDb}.`);
+    }
+    if (
+      !turn.contextLoaded
+      && !turn.setupMode
+      && (operation.action || operation.check || operation.requiresAcceptedAction)
+    ) {
+      throw new Error("Load the exact room context first, before action adjudication, checks, or gameplay mutations.");
+    }
+    if (
+      turn.contextLoaded
+      && operation.operationRoom
+      && operation.operationRoom !== turn.contextRoom
+    ) {
+      throw new Error(`All turn operations must use the same exact room as context: ${turn.contextRoom}.`);
+    }
+    if (operation.action && turn.actionAdjudications.length > 0) {
+      throw new Error("Only one successful action adjudication is allowed per turn; do not rewrite or re-submit a rejected player action.");
+    }
+    if (operation.action && !["accepted", "rejected"].includes(operation.decision)) {
+      throw new Error("Action --decision must be exactly accepted or rejected; check is a separate command after an accepted ruling.");
+    }
+    if (
+      operation.action
+      && (!operation.playerAction || !turn.playerInput.includes(operation.playerAction))
+    ) {
+      throw new Error("Copy the exact contiguous player wording into ACTION; do not summarize or paraphrase it.");
+    }
+    if (operation.check && operation.explicitRoll !== undefined) {
+      const escapedRoll = String(operation.explicitRoll).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      const declaredRoll = new RegExp(
+        `(?:實體骰(?:結果)?(?:是|為)?|骰(?:值|點|結果)(?:是|為)?|roll(?:ed| result)?|d100)\\s*[:=：]?\\s*${escapedRoll}(?!\\d)`,
+        "iu",
+      ).test(turn.playerInput);
+      if (!declaredRoll) {
+        throw new Error("Omit --roll for random d100; an explicit roll requires an unambiguous player-declared roll value.");
+      }
+    }
+    const latestAction = turn.actionAdjudications.at(-1);
+    if (operation.check && latestAction?.decision !== "accepted") {
+      throw new Error("A check requires an accepted player action persisted earlier in the same turn.");
+    }
+    if (
+      operation.mutation
+      && operation.requiresAcceptedAction
+      && !turn.setupMode
+      && latestAction?.decision !== "accepted"
+    ) {
+      throw new Error("This gameplay mutation requires an accepted player action persisted earlier in the same turn.");
+    }
+    const result = await pi.exec(CLI_WRAPPER, ["--db", params.db, ...params.args], { signal });
+    if (result.code !== 0) {
+      throw new Error(result.stderr || result.stdout || `trpg-gm exited with code ${result.code}`);
+    }
+    activate();
+    turn.dbPaths.add(params.db);
+    turn.dbPaths.add(dbKey);
+    const operationIndex = ++turn.operationIndex;
+    if (operation.contextRoom) {
+      turn.contextLoaded = true;
+      turn.contextRoom = operation.contextRoom;
+      turn.contextDb = dbKey;
+    }
+    if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
+    if (operation.characterProposal) {
+      turn.characterProposals.push(parseCharacterProposal(result.stdout));
+    }
+    if (operation.characterGenerated) {
+      turn.characterGenerations.push(parseCharacterGeneration(result.stdout));
+    }
+    if (operation.action) {
+      turn.actionAdjudications.push(parseActionAdjudication(result.stdout));
+      turn.latestActionIndex = operationIndex;
+      turn.actionRulingAppended = false;
+    }
+    if (operation.check) {
+      turn.checkReports.push(parseCheckReport(result.stdout));
+      turn.checkOperationIndices.push(operationIndex);
+      turn.checkReportAppended = false;
+      turn.checkResolved = true;
+    }
+    if (operation.mutation) turn.mutationOperationIndices.push(operationIndex);
+    if (operation.safeSetupMutation) {
+      turn.safeSetupMutationOperationIndices.add(operationIndex);
+    }
+    turn.mutationPersisted ||= operation.mutation;
+    turn.finalized = false;
+    return {
+      content: [{ type: "text", text: result.stdout || "{}" }],
+      details: { db: params.db, args: params.args, operation },
+    };
+  }
+
   pi.registerTool({
     name: "trpg_gm_cli",
     label: "TRPG GM CLI",
-    description: "Run the persistent TRPG CLI with structured arguments. To read a room, use exactly args [\"context\",\"ROOM\"]; room show, room state, and character list do not exist, and never create a room merely to load one. Context includes immutable guardrails. During setup use guardrail add. For action adjudicate and every subcommand, put positionals before options: [\"action\",\"adjudicate\",\"ROOM\",\"CHARACTER\",\"ACTION\",\"--decision\",...]. Matching terms mechanically force rejection even if accepted was requested.",
+    description: "Run the persistent TRPG CLI with structured arguments. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/list/upsert/resolve subcommand. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes immutable guardrails; matching terms force rejection, which cannot be replaced by another ruling in the same turn.",
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
@@ -284,45 +447,147 @@ export default function trpgGmGuard(pi) {
     },
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {
-      const result = await pi.exec(CLI_WRAPPER, ["--db", params.db, ...params.args], { signal });
-      if (result.code !== 0) {
-        throw new Error(result.stderr || result.stdout || `trpg-gm exited with code ${result.code}`);
-      }
-      activate();
-      const operation = classifyCliArgs(params.args);
-      const operationIndex = ++turn.operationIndex;
-      if (operation.contextRoom) {
-        turn.contextLoaded = true;
-        turn.contextRoom = operation.contextRoom;
-      }
-      if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
-      if (operation.characterProposal) {
-        turn.characterProposals.push(parseCharacterProposal(result.stdout));
-      }
-      if (operation.characterGenerated) {
-        turn.characterGenerations.push(parseCharacterGeneration(result.stdout));
-      }
-      if (operation.action) {
-        turn.actionAdjudications.push(parseActionAdjudication(result.stdout));
-        turn.latestActionIndex = operationIndex;
-        turn.actionRulingAppended = false;
-      }
-      if (operation.check) {
-        turn.checkReports.push(parseCheckReport(result.stdout));
-        turn.checkOperationIndices.push(operationIndex);
-        turn.checkReportAppended = false;
-        turn.checkResolved = true;
-      }
-      if (operation.mutation) turn.mutationOperationIndices.push(operationIndex);
-      if (operation.safeSetupMutation) {
-        turn.safeSetupMutationOperationIndices.add(operationIndex);
-      }
-      turn.mutationPersisted ||= operation.mutation;
-      turn.finalized = false;
-      return {
-        content: [{ type: "text", text: result.stdout || "{}" }],
-        details: { db: params.db, args: params.args, operation },
-      };
+      return executeCli(params, signal);
+    },
+  });
+
+  const dbRoomProperties = {
+    db: { type: "string", description: "Room database path" },
+    room: { type: "string", description: "Exact room id" },
+  };
+  const registerTypedTool = (definition) => pi.registerTool({
+    ...definition,
+    executionMode: "sequential",
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_context",
+    label: "TRPG Context",
+    description: "Load the exact room context and immutable guardrails. Use this first every gameplay turn; do not guess raw CLI tokens.",
+    parameters: {
+      type: "object", additionalProperties: false, required: ["db", "room"],
+      properties: { ...dbRoomProperties, events: { type: "integer", minimum: 1, default: 20 } },
+    },
+    async execute(_id, params, signal) {
+      const args = ["context", params.room];
+      if (params.events !== undefined) args.push("--events", String(params.events));
+      return executeCli({ db: params.db, args }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_action_adjudicate",
+    label: "TRPG Action Adjudicate",
+    description: "Persist exactly one ruling for the player's exact action text before checks or consequences.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "character", "action", "decision", "basis", "reason"],
+      properties: {
+        ...dbRoomProperties,
+        character: { type: "string" },
+        action: { type: "string", description: "Exact contiguous wording copied from player input" },
+        decision: { type: "string", enum: ["accepted", "rejected"] },
+        basis: { type: "string" }, reason: { type: "string" },
+      },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "action", "adjudicate", params.room, params.character, params.action,
+        "--decision", params.decision, "--basis", params.basis, "--reason", params.reason,
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_check",
+    label: "TRPG Check",
+    description: "Resolve and persist a check. Omit roll for random d100; only pass roll when the player explicitly supplied it.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "character", "stat"],
+      properties: {
+        ...dbRoomProperties, character: { type: "string" }, stat: { type: "string" },
+        roll: { type: "integer", minimum: 1, maximum: 100 },
+      },
+    },
+    async execute(_id, params, signal) {
+      const args = ["check", params.room, params.character, params.stat];
+      if (params.roll !== undefined) args.push("--roll", String(params.roll));
+      return executeCli({ db: params.db, args }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_entity_upsert",
+    label: "TRPG Entity Upsert",
+    description: "Merge a confirmed NPC, clue, quest, scene, item, or other entity state using typed fields.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "kind", "id", "name", "state"],
+      properties: {
+        ...dbRoomProperties, kind: { type: "string" }, id: { type: "string" },
+        name: { type: "string" }, state: { type: "object", additionalProperties: true },
+      },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "entity", params.room, params.kind, params.id, params.name,
+        "--state", JSON.stringify(params.state),
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_character_adjust",
+    label: "TRPG Character Resource Adjust",
+    description: "Persist an HP, MP, or SAN delta with an in-world reason.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "character", "resource", "delta", "reason"],
+      properties: {
+        ...dbRoomProperties, character: { type: "string" },
+        resource: { type: "string", enum: ["hp", "mp", "san"] },
+        delta: { type: "integer" }, reason: { type: "string" },
+      },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "character", "adjust", params.room, params.character, params.resource,
+        String(params.delta), "--reason", params.reason,
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_canon_set",
+    label: "TRPG Canon Set",
+    description: "Persist an immutable established fact. Do not use canon for mutable scene state or failed attempts.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "key", "value", "source"],
+      properties: { ...dbRoomProperties, key: { type: "string" }, value: { type: "string" }, source: { type: "string" } },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "canon", params.room, params.key, params.value, "--source", params.source,
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_recap_save",
+    label: "TRPG Recap Save",
+    description: "Save a player-safe recap only at campaign creation or a natural session break, never every turn.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "summary", "state"],
+      properties: { ...dbRoomProperties, summary: { type: "string" }, state: { type: "object", additionalProperties: true } },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "recap", "save", params.room, "--summary", params.summary,
+        "--state", JSON.stringify(params.state),
+      ] }, signal);
     },
   });
 

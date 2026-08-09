@@ -83,6 +83,33 @@ class GameStoreTests(unittest.TestCase):
                 {"status": "alive", "attitude": "guarded", "secret": "has-key"},
             )
 
+    def test_entity_turn_cannot_move_backwards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.sqlite3")
+            store.create_room("room-a", "coc7")
+            store.upsert_entity(
+                "room-a", "scene", "manor", "莊園",
+                {"turn": 11, "status": "archive-open"},
+            )
+            event_count = len(store.list_events("room-a"))
+
+            with self.assertRaisesRegex(ValueError, "turn cannot move backwards"):
+                store.upsert_entity(
+                    "room-a", "scene", "manor", "莊園",
+                    {"turn": 9, "status": "foyer"},
+                )
+            for invalid_turn in ("12", 12.5, True, -1):
+                with self.subTest(invalid_turn=invalid_turn):
+                    with self.assertRaisesRegex(ValueError, "turn must be a non-negative integer"):
+                        store.upsert_entity(
+                            "room-a", "scene", "manor", "莊園",
+                            {"turn": invalid_turn},
+                        )
+
+            entity = store.get_context("room-a")["entities"][0]
+            self.assertEqual(entity["state"], {"turn": 11, "status": "archive-open"})
+            self.assertEqual(len(store.list_events("room-a")), event_count)
+
     def test_latest_player_safe_recap_persists_across_sessions(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "campaign.sqlite3"
