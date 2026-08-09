@@ -19,7 +19,7 @@ cd <directory-containing-this-SKILL.md>
 
 預設建議每個遊戲 room 使用獨立資料庫：`<workspace>/.trpg/rooms/<room-id>.sqlite3`。`room-id` 必須取自目前 Discord channel/thread、web room 或使用者明確指定的名稱；不確定時先問，絕不能猜到別的 room。
 
-完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。Pi 環境若提供 typed gameplay tools，必須優先使用 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_canon_set` 與 `trpg_gm_recap_save`；它們直接接收命名欄位與 JSON object，可避免漏掉 subcommand、room、name 或產生壞 JSON。只有 typed tools 尚未涵蓋的 setup／查詢操作才使用 `trpg_gm_cli`。所有 Pi TRPG 狀態操作都不得使用 bash wrapper。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
+完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。Pi 環境若提供 typed gameplay tools，必須優先使用 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set` 與 `trpg_gm_recap_save`；它們直接接收命名欄位與 JSON object，可避免漏掉 subcommand、room、name 或產生壞 JSON。只有 typed tools 尚未涵蓋的 setup／查詢操作才使用 `trpg_gm_cli`。所有 Pi TRPG 狀態操作都不得使用 bash wrapper。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
 
 ### Pi 結構化工具速查
 
@@ -32,6 +32,9 @@ trpg_gm_check             {db, room, character, stat, roll?}
 trpg_gm_entity_upsert     {db, room, kind, id, name, state}
 trpg_gm_character_adjust  {db, room, character, resource, delta, reason}
 trpg_gm_character_availability {db, room, character, canAct, reason}
+trpg_gm_story_objective   {db, room, chapter, objective, reason}
+trpg_gm_story_progress    {db, room, status, reason} # advanced|stalled
+trpg_gm_story_intervene   {db, room, event, intendedProgress, reason}
 trpg_gm_canon_set         {db, room, key, value, source}
 trpg_gm_recap_save        {db, room, summary, state}
 ```
@@ -74,11 +77,18 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 3. **處理劇本**：讀取 `room.script_path`。有路徑但檔案不存在時停止遊戲並請玩家修正。沒有路徑時，先提醒可提供劇本；若玩家要直接開始，就即興建立 premise、主要衝突與初始場景，並以 `canon`/`entity` 儲存。
 4. **一致性檢查**：以劇本、canon、角色卡、entities、recent_events、`context.guardrails` 與規則為準。資訊不足時只補最小必要細節並立刻保存；不可悄悄改寫既有事實。持久化 guardrail 不可覆寫或忽略。
 5. **公平聚光燈**：讀取 `context.participation`。GM 必須讓每個目前可行動的玩家獲得平等的參與與決策機會；邀請下一位玩家行動時，優先選擇 `next_spotlight_character_ids` 中累積行動較少者，不可因某位玩家積極就長期只讓該角色推進劇情。被邀請不等於 GM 代替該玩家行動，玩家可以放棄機會。只有 HP 已降至 0，或已用 `character availability --can-act false` 保存昏迷、束縛、離場等確定狀態的角色，才可暫時排除；狀態解除後必須立即恢復 `canAct=true`。
-6. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
-7. **判定**：只有已接受的行動，而且結果不確定、失敗有意義時才擲骰。先說明技能、目標值與風險，再執行 `check`；不可事後竄改骰子。每次判定結果都必須向玩家回報角色、技能、roll、目標值與成功等級，不能只敘述後果，也不能把 `hard` 誤稱為「勉強成功」。標準對照為 `critical=大成功`、`extreme=極難成功`、`hard=困難成功`、`success=成功`、`failure=失敗`、`fumble=大失敗`。
-8. **套用後果**：先用 `character adjust`、`entity`、`canon` 寫入狀態，再敘述確定發生的結果。新增 NPC、線索、場景或支線也必須保存。
-9. **Pi 回合驗證**：若環境提供 `trpg_turn_finalize` 工具，所有 CLI 寫入完成後，在獨立的工具回合以 `turnKind=gameplay` 呼叫它；`playerActionStatus` 必須與已保存的行動裁定一致；沒有玩家行動時才可用 `not_applicable` 並填寫 `noPlayerActionReason`。列出已保存的玩家安全變化，確認未洩密且未替玩家決策。若有兩名以上角色可行動，必須把 `nextSpotlightCharacterId` 設成重新計算後 `next_spotlight_character_ids` 的其中一位，並在回覆結尾將下一個有意義的決策機會交給該玩家。若仍在詢問新／舊團、room-id 或缺少的角色設定，可改用 `turnKind=clarification` 並說明等待的玩家輸入；已裁定行動、擲骰或寫入狀態後不得使用此例外。驗證失敗時先補齊狀態，不能直接輸出敘事。其他 agent 沒有此工具時略過工具呼叫，但仍須自行完成同一份檢查。
-10. **回覆玩家**：保持遊戲內視角，清楚描述可感知資訊；若拒絕行動，明確列出行動、拒絕原因與設定依據；最後問「你要怎麼做？」而不是替玩家選行動。
+6. **劇情推進時鐘**：讀取 `context.story_progress` 的目前章節、目標與 `stagnant_action_count`。每個被接受、可實際改變局面的玩家 action 裁定後，都必須用 `story progress --status advanced|stalled` 誠實記錄是否真正推進章節或目標；換地點、重複搜索或只有氣氛變化不算自動推進。連續第三次 `stalled` 時，GM 必須立即用 `story intervene` 保存一個具體的世界事件及其 `intended_progress`，再敘述該事件；不得改目標、繼續接受第四個 action 或虛報 advanced 來清零。介入事件可以是時間壓力、NPC 帶來線索、敵對方主動行動、環境改變或入口開啟，但不得替玩家角色做決定，也不得保證檢定成功。
+7. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
+8. **判定**：只有已接受的行動，而且結果不確定、失敗有意義時才擲骰。先說明技能、目標值與風險，再執行 `check`；不可事後竄改骰子。每次判定結果都必須向玩家回報角色、技能、roll、目標值與成功等級，不能只敘述後果，也不能把 `hard` 誤稱為「勉強成功」。標準對照為 `critical=大成功`、`extreme=極難成功`、`hard=困難成功`、`success=成功`、`failure=失敗`、`fumble=大失敗`。
+9. **套用後果**：先用 `character adjust`、`entity`、`canon` 寫入狀態，再敘述確定發生的結果。新增 NPC、線索、場景或支線也必須保存。
+10. **Pi 回合驗證**：若環境提供 `trpg_turn_finalize` 工具，所有 CLI 寫入完成後，在獨立的工具回合以 `turnKind=gameplay` 呼叫它；`playerActionStatus` 必須與已保存的行動裁定一致；沒有玩家行動時才可用 `not_applicable` 並填寫 `noPlayerActionReason`。列出已保存的玩家安全變化，確認未洩密且未替玩家決策。若有兩名以上角色可行動，必須把 `nextSpotlightCharacterId` 設成重新計算後 `next_spotlight_character_ids` 的其中一位，並在回覆結尾將下一個有意義的決策機會交給該玩家。若仍在詢問新／舊團、room-id 或缺少的角色設定，可改用 `turnKind=clarification` 並說明等待的玩家輸入；已裁定行動、擲骰或寫入狀態後不得使用此例外。驗證失敗時先補齊狀態，不能直接輸出敘事。其他 agent 沒有此工具時略過工具呼叫，但仍須自行完成同一份檢查。
+11. **回覆玩家**：保持遊戲內視角，清楚描述可感知資訊；若拒絕行動，明確列出行動、拒絕原因與設定依據；最後問「你要怎麼做？」而不是替玩家選行動。
+
+## 防止劇情原地打轉
+
+`context.story_progress` 持久化目前 `chapter`、`objective`、連續未推進 action 數與是否必須介入。開團或進入新章節時用 `trpg_gm_story_objective` 設定可觀察的當前目標。每次 accepted 玩家 action 後，用 `trpg_gm_story_progress` 記錄 `advanced` 或 `stalled` 及具體依據；機械性拒絕不計入。
+
+連續三次 `stalled` 會把 `intervention_required` 設為 true。SQLite 核心會阻擋下一個玩家 action，也禁止用更換 objective 規避；Pi finalizer 會阻擋玩家回覆，直到 `trpg_gm_story_intervene` 保存具體事件、預期推進方向及介入原因。介入後計數歸零。這是強制提供新局面，不是替玩家選擇，也不能竄改 canon、洩漏未發現秘密或宣告玩家自動成功。
 
 ## 多玩家公平參與
 

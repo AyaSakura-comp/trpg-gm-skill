@@ -835,6 +835,129 @@ class GameStore:
         }
         return character
 
+    @staticmethod
+    def _counts_for_story_progress(event: dict[str, Any]) -> bool:
+        payload = event["payload"]
+        return (
+            event["kind"] == "action_adjudicated"
+            and payload.get("decision") == "accepted"
+            and not payload.get("availability_enforced")
+            and not payload.get("enforced_guardrails")
+        )
+
+    def get_story_progress(
+        self, room_id: str, events: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        room_events = events if events is not None else self.list_events(room_id)
+        objective_event = next(
+            (event for event in reversed(room_events) if event["kind"] == "story_objective_set"),
+            None,
+        )
+        objective_event_id = objective_event["id"] if objective_event else 0
+        objective_payload = objective_event["payload"] if objective_event else {
+            "chapter": "目前章節",
+            "objective": "推進至劇本下一章或目前場景目標",
+            "reason": "room default",
+        }
+        stagnant_action_count = 0
+        assessed_action_ids: set[int] = set()
+        last_progress_event_id = None
+        for event in room_events:
+            if event["id"] <= objective_event_id:
+                continue
+            if event["kind"] == "story_progress_recorded":
+                assessed_action_ids.add(event["payload"]["action_event_id"])
+                stagnant_action_count = (
+                    stagnant_action_count + 1
+                    if event["payload"]["status"] == "stalled"
+                    else 0
+                )
+                last_progress_event_id = event["id"]
+            elif event["kind"] == "story_intervention":
+                stagnant_action_count = 0
+                last_progress_event_id = event["id"]
+        pending_actions = [
+            event for event in room_events
+            if event["id"] > objective_event_id
+            and self._counts_for_story_progress(event)
+            and event["id"] not in assessed_action_ids
+        ]
+        return {
+            "chapter": objective_payload["chapter"],
+            "objective": objective_payload["objective"],
+            "objective_reason": objective_payload["reason"],
+            "stagnant_action_count": stagnant_action_count,
+            "stagnation_limit": 3,
+            "intervention_required": stagnant_action_count >= 3,
+            "pending_action_event_id": pending_actions[-1]["id"] if pending_actions else None,
+            "last_progress_event_id": last_progress_event_id,
+        }
+
+    def set_story_objective(
+        self, room_id: str, *, chapter: str, objective: str, reason: str
+    ) -> dict[str, Any]:
+        if self.get_room(room_id) is None:
+            raise KeyError(f"unknown room: {room_id}")
+        current_progress = self.get_story_progress(room_id)
+        if current_progress["pending_action_event_id"] is not None:
+            raise ValueError("cannot replace the story objective while a pending action is unassessed")
+        if current_progress["stagnant_action_count"] > 0:
+            raise ValueError("cannot replace the story objective after a stalled action; advance it or intervene")
+        if not chapter.strip() or not objective.strip() or not reason.strip():
+            raise ValueError("chapter, objective, and reason must not be empty")
+        payload = {
+            "chapter": chapter.strip(),
+            "objective": objective.strip(),
+            "reason": reason.strip(),
+        }
+        with self._connect() as db:
+            self._append_event(db, room_id, "story_objective_set", payload)
+        return self.get_story_progress(room_id)
+
+    def record_story_progress(
+        self, room_id: str, *, status: str, reason: str
+    ) -> dict[str, Any]:
+        if status not in {"advanced", "stalled"}:
+            raise ValueError("story progress status must be advanced or stalled")
+        if not reason.strip():
+            raise ValueError("story progress reason must not be empty")
+        progress = self.get_story_progress(room_id)
+        action_event_id = progress["pending_action_event_id"]
+        if action_event_id is None:
+            raise ValueError("story progress requires an unassessed player action")
+        payload = {
+            "action_event_id": action_event_id,
+            "status": status,
+            "reason": reason.strip(),
+        }
+        with self._connect() as db:
+            self._append_event(db, room_id, "story_progress_recorded", payload)
+        return self.get_story_progress(room_id)
+
+    def intervene_story(
+        self,
+        room_id: str,
+        *,
+        event: str,
+        intended_progress: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if not event.strip() or not intended_progress.strip() or not reason.strip():
+            raise ValueError("intervention event, intended_progress, and reason must not be empty")
+        progress = self.get_story_progress(room_id)
+        if not progress["intervention_required"]:
+            raise ValueError("story intervention is only allowed after three stalled actions")
+        payload = {
+            "event": event.strip(),
+            "intended_progress": intended_progress.strip(),
+            "reason": reason.strip(),
+            "chapter": progress["chapter"],
+            "objective": progress["objective"],
+        }
+        with self._connect() as db:
+            self._append_event(db, room_id, "story_intervention", payload)
+        return self.get_story_progress(room_id)
+
     def adjudicate_action(
         self,
         room_id: str,
@@ -855,6 +978,17 @@ class GameStore:
             raise ValueError("reason must explain why the action is accepted or rejected")
         if self.get_character(room_id, character_id) is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
+        story_progress = self.get_story_progress(room_id)
+        if story_progress["pending_action_event_id"] is not None:
+            raise ValueError(
+                "an unassessed player action must be recorded as advanced or stalled "
+                "before another action"
+            )
+        if story_progress["intervention_required"]:
+            raise ValueError(
+                "story intervention required after three stalled player actions; "
+                "introduce and persist an event that advances the chapter or objective"
+            )
         requested_decision = decision
         participation = self._get_participation(room_id)
         participant = next(
@@ -1013,6 +1147,7 @@ class GameStore:
             "characters": characters,
             "character_creation": creation,
             "participation": self._get_participation(room_id, events),
+            "story_progress": self.get_story_progress(room_id, events),
             "guardrails": self.list_guardrails(room_id),
             "canon": {row["key"]: row["value"] for row in canon_rows},
             "entities": [

@@ -44,6 +44,12 @@ Equal opportunity is not forced identical behavior. A player may decline, and ur
 
 Only exclude a character whose current persisted state prevents action. HP at zero is automatically ineligible; use `character availability --can-act false --reason ...` for established conditions such as unconsciousness, restraint, petrification, or absence, and restore `true` as soon as the condition ends. Never invent incapacity to manipulate the participation order.
 
+## Forward story momentum
+
+Always maintain a concrete current chapter and objective in `context.story_progress`. After every accepted player action ruling, record whether it materially `advanced` that objective or `stalled`; do not call repetition, cosmetic movement, or atmosphere alone progress. Rejected actions, including availability- and immutable-guardrail-enforced rejections, are excluded because they do not alter the world and cannot safely cause world-state consequences.
+
+Three consecutive stalled actions trigger a mandatory intervention. Before accepting another action, introduce and persist a concrete in-world event that opens a route toward the next chapter or objective: escalating time pressure, an NPC move, a new player-visible clue, an enemy initiative, or a physical scene change. The event should change the available situation, not dictate any player-character speech, movement, thought, or choice. It may create a fair check or consequence, but may not guarantee success, rewrite canon, or reveal GM-only secrets. Never clear the clock by dishonestly marking progress or replacing the objective.
+
 ## Fair adjudication
 
 Before resolving a declared player action, compare it against the scenario, canon, character capabilities, current scene, established entities/events, and rules. Persist the ruling with `action adjudicate`, including a concrete basis and reason. An action may be rejected when it lacks established support, exceeds the character's capabilities, contradicts canon/rules, or is impossible in the current scene. Explain every rejection to the player and do not roll or mutate world state for it. Absence from a scenario's explicit list is not by itself a reason to reject an otherwise plausible creative action.

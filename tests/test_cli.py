@@ -143,6 +143,43 @@ class CliTests(unittest.TestCase):
             self.assertFalse(participant["can_act"])
             self.assertEqual(participant["unavailable_reason"], "受到束縛")
 
+    def test_story_progress_cli_tracks_stagnation_and_intervention(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "game.db")
+            with redirect_stdout(StringIO()):
+                main(["--db", db, "room", "create", "demo", "--system", "coc7"])
+                main([
+                    "--db", db, "character", "add", "demo", "alice", "艾莉絲",
+                    "--hp", "10", "--mp", "8", "--san", "55",
+                ])
+                main([
+                    "--db", db, "story", "objective", "demo",
+                    "--chapter", "第一章", "--objective", "找到地下室入口",
+                    "--reason", "劇本目前目標",
+                ])
+                for index in range(3):
+                    main([
+                        "--db", db, "action", "adjudicate", "demo", "alice",
+                        f"搜索大廳 {index}", "--decision", "accepted",
+                        "--basis", "場景允許", "--reason", "一般搜索",
+                    ])
+                    main([
+                        "--db", db, "story", "progress", "demo",
+                        "--status", "stalled", "--reason", "沒有新發現",
+                    ])
+            output = StringIO()
+            with redirect_stdout(output):
+                main([
+                    "--db", db, "story", "intervene", "demo",
+                    "--event", "地下室傳出撞擊聲，暗門隨即打開",
+                    "--intended-progress", "引導玩家前往地下室",
+                    "--reason", "三次玩家行動沒有推進劇情",
+                ])
+
+            progress = json.loads(output.getvalue())
+            self.assertEqual(progress["stagnant_action_count"], 0)
+            self.assertFalse(progress["intervention_required"])
+
     def test_action_adjudicate_emits_persisted_ruling(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "game.sqlite3")

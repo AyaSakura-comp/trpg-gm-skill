@@ -173,6 +173,18 @@ function classifyCliArgs(args) {
       mutation: false,
     };
   }
+  if (command === "story" && ["objective", "progress", "intervene"].includes(actionOrRoom)) {
+    return {
+      contextRoom: null,
+      operationRoom: subcommandRoom,
+      action: false,
+      check: false,
+      mutation: true,
+      requiresContext: true,
+      storyOperation: actionOrRoom,
+      doesNotResolveAction: actionOrRoom === "progress",
+    };
+  }
   if (command === "check") {
     return {
       contextRoom: null,
@@ -231,6 +243,32 @@ function parseParticipation(stdout) {
   }
 }
 
+function parseStoryProgress(stdout) {
+  try {
+    const value = JSON.parse(stdout);
+    const progress = value?.story_progress ?? value;
+    if (
+      !progress
+      || typeof progress.chapter !== "string"
+      || !progress.chapter.trim()
+      || typeof progress.objective !== "string"
+      || !progress.objective.trim()
+      || !Number.isInteger(progress.stagnant_action_count)
+      || progress.stagnant_action_count < 0
+      || typeof progress.intervention_required !== "boolean"
+      || progress.intervention_required !== (progress.stagnant_action_count >= 3)
+    ) return null;
+    return {
+      chapter: progress.chapter,
+      objective: progress.objective,
+      stagnantActionCount: progress.stagnant_action_count,
+      interventionRequired: progress.intervention_required,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function nextSpotlightCharacterIds(participation) {
   const eligible = (participation ?? []).filter((character) => character.canAct);
   const minimum = Math.min(...eligible.map((character) => character.actionCount));
@@ -249,6 +287,10 @@ function freshTurn() {
     operationRooms: new Set(),
     dbPaths: new Set(),
     participation: null,
+    storyProgress: null,
+    storyProgressRecorded: false,
+    storyInterventionPersisted: false,
+    actionNeedsProgress: false,
     operationIndex: 0,
     latestActionIndex: null,
     checkOperationIndices: [],
@@ -285,6 +327,7 @@ function checklist() {
     "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
     "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
     "13. Use context.participation to give equal spotlight opportunities to all eligible players. Prefer next_spotlight_character_ids when inviting the next action. Only exclude a character whose persisted availability or HP says they cannot act; record other temporary inability with trpg_gm_character_availability.",
+    "14. Read context.story_progress. After each accepted, countable player action, persist advanced or stalled with trpg_gm_story_progress. At three consecutive stalled actions, persist a concrete in-world event with trpg_gm_story_intervene before narrating or accepting another action; never replace the objective to evade this clock.",
   ].join("\n");
 }
 
@@ -424,10 +467,15 @@ export default function trpgGmGuard(pi) {
     turn.dbPaths.add(dbKey);
     const operationIndex = ++turn.operationIndex;
     if (operation.contextRoom) {
+      const storyProgress = parseStoryProgress(result.stdout);
+      if (!storyProgress) {
+        throw new Error("Successful context omitted valid persistent story_progress fields.");
+      }
       turn.contextLoaded = true;
       turn.contextRoom = operation.contextRoom;
       turn.contextDb = dbKey;
       turn.participation = parseParticipation(result.stdout);
+      turn.storyProgress = storyProgress;
     }
     if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
     if (operation.characterProposal) {
@@ -469,13 +517,26 @@ export default function trpgGmGuard(pi) {
         }
       }
     }
+    if (operation.storyOperation) {
+      const storyProgress = parseStoryProgress(result.stdout);
+      if (!storyProgress) {
+        throw new Error("Successful story progress operation returned invalid or omitted progress fields.");
+      }
+      turn.storyProgress = storyProgress;
+      if (operation.storyOperation === "progress") turn.storyProgressRecorded = true;
+      if (operation.storyOperation === "intervene") turn.storyInterventionPersisted = true;
+    }
     if (operation.action) {
+      turn.storyProgressRecorded = false;
       const adjudication = parseActionAdjudication(result.stdout);
       turn.actionAdjudications.push(adjudication);
       try {
         const rawAdjudication = JSON.parse(result.stdout);
         const countsAsParticipation = !rawAdjudication.availability_enforced
           && !rawAdjudication.enforced_guardrails;
+        turn.actionNeedsProgress = countsAsParticipation
+          && adjudication.decision === "accepted"
+          && turn.storyProgress !== null;
         const participant = turn.participation?.find(
           (character) => character.characterId === adjudication.characterId,
         );
@@ -492,11 +553,13 @@ export default function trpgGmGuard(pi) {
       turn.checkReportAppended = false;
       turn.checkResolved = true;
     }
-    if (operation.mutation) turn.mutationOperationIndices.push(operationIndex);
+    if (operation.mutation && !operation.doesNotResolveAction) {
+      turn.mutationOperationIndices.push(operationIndex);
+    }
     if (operation.safeSetupMutation) {
       turn.safeSetupMutationOperationIndices.add(operationIndex);
     }
-    turn.mutationPersisted ||= operation.mutation;
+    turn.mutationPersisted ||= operation.mutation && !operation.doesNotResolveAction;
     turn.finalized = false;
     return {
       content: [{ type: "text", text: result.stdout || "{}" }],
@@ -507,7 +570,7 @@ export default function trpgGmGuard(pi) {
   pi.registerTool({
     name: "trpg_gm_cli",
     label: "TRPG GM CLI",
-    description: "Run the persistent TRPG CLI with structured arguments. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"character\",\"availability\",ROOM,CHARACTER,\"--can-act\",\"true|false\",\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/list/upsert/resolve subcommand. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes participation priorities and immutable guardrails; matching terms force rejection, which cannot be replaced by another ruling in the same turn.",
+    description: "Run the persistent TRPG CLI with structured arguments. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"character\",\"availability\",ROOM,CHARACTER,\"--can-act\",\"true|false\",\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/list/upsert/resolve subcommand. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes participation and story-progress clocks plus immutable guardrails; matching guardrail terms force rejection, which cannot be replaced by another ruling in the same turn. Use story objective/progress/intervene commands; three stalled actions require a persisted intervention before another action.",
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
@@ -662,6 +725,67 @@ export default function trpgGmGuard(pi) {
   });
 
   registerTypedTool({
+    name: "trpg_gm_story_objective",
+    label: "TRPG Story Objective",
+    description: "Persist the current chapter and concrete objective that play must move toward.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "chapter", "objective", "reason"],
+      properties: {
+        ...dbRoomProperties, chapter: { type: "string" },
+        objective: { type: "string" }, reason: { type: "string" },
+      },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "story", "objective", params.room, "--chapter", params.chapter,
+        "--objective", params.objective, "--reason", params.reason,
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_story_progress",
+    label: "TRPG Story Progress",
+    description: "After each countable player action, persist whether it advanced the current objective or stalled.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "status", "reason"],
+      properties: {
+        ...dbRoomProperties,
+        status: { type: "string", enum: ["advanced", "stalled"] },
+        reason: { type: "string" },
+      },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "story", "progress", params.room, "--status", params.status,
+        "--reason", params.reason,
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
+    name: "trpg_gm_story_intervene",
+    label: "TRPG Story Intervention",
+    description: "After three stalled player actions, persist a concrete in-world event that pushes play toward the chapter or objective.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "event", "intendedProgress", "reason"],
+      properties: {
+        ...dbRoomProperties, event: { type: "string" },
+        intendedProgress: { type: "string" }, reason: { type: "string" },
+      },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "story", "intervene", params.room, "--event", params.event,
+        "--intended-progress", params.intendedProgress, "--reason", params.reason,
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
     name: "trpg_gm_canon_set",
     label: "TRPG Canon Set",
     description: "Persist an immutable established fact. Do not use canon for mutable scene state or failed attempts.",
@@ -768,6 +892,16 @@ export default function trpgGmGuard(pi) {
       }
       if (!turn.contextLoaded || turn.contextRoom !== params.roomId) {
         throw new Error(`TRPG turn is not ready: run trpg-gm context for the exact room ${params.roomId}; last loaded room was ${turn.contextRoom ?? "none"}.`);
+      }
+      if (turn.actionNeedsProgress && !turn.storyProgressRecorded) {
+        throw new Error(
+          "After every countable player action, record whether story progress advanced or stalled.",
+        );
+      }
+      if (turn.storyProgress?.interventionRequired && !turn.storyInterventionPersisted) {
+        throw new Error(
+          "Three player actions have stalled; introduce and persist an in-world event that advances the chapter or objective.",
+        );
       }
       const eligibleCount = turn.participation?.filter((character) => character.canAct).length ?? 0;
       if (eligibleCount > 1) {

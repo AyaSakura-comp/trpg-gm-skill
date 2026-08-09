@@ -59,9 +59,15 @@ class GameStoreTests(unittest.TestCase):
                     "room-a", "alice", action, decision="accepted",
                     basis="目前場景允許調查", reason="一般調查行動可行",
                 )
+                store.record_story_progress(
+                    "room-a", status="advanced", reason="完成一個新的調查方向",
+                )
             store.adjudicate_action(
                 "room-a", "bob", "我聆聽門後", decision="accepted",
                 basis="目前場景允許調查", reason="一般調查行動可行",
+            )
+            store.record_story_progress(
+                "room-a", status="advanced", reason="取得另一個調查方向",
             )
             store.set_character_availability(
                 "room-a", "carol", can_act=False, reason="遭束縛，尚未脫困"
@@ -76,6 +82,140 @@ class GameStoreTests(unittest.TestCase):
             self.assertEqual(by_id["bob"]["action_count"], 1)
             self.assertFalse(by_id["carol"]["can_act"])
             self.assertEqual(by_id["carol"]["unavailable_reason"], "遭束縛，尚未脫困")
+
+    def test_three_stalled_actions_require_a_story_intervention(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.set_story_objective(
+                "room-a", chapter="第一章", objective="找到進入地下室的方法",
+                reason="劇本目前目標",
+            )
+
+            for index in range(3):
+                store.adjudicate_action(
+                    "room-a", "alice", f"再次檢查大廳 {index}", decision="accepted",
+                    basis="可以重複搜索", reason="角色能執行搜索",
+                )
+                if index == 0:
+                    with self.assertRaisesRegex(ValueError, "unassessed.*action"):
+                        store.adjudicate_action(
+                            "room-a", "alice", "搶先執行下一步", decision="accepted",
+                            basis="仍在大廳", reason="嘗試繼續",
+                        )
+                progress = store.record_story_progress(
+                    "room-a", status="stalled", reason="沒有發現新線索",
+                )
+
+            self.assertEqual(progress["stagnant_action_count"], 3)
+            self.assertTrue(progress["intervention_required"])
+            context = store.get_context("room-a")["story_progress"]
+            self.assertEqual(context["objective"], "找到進入地下室的方法")
+            with self.assertRaisesRegex(ValueError, "cannot replace.*objective"):
+                store.set_story_objective(
+                    "room-a", chapter="第二章", objective="跳過目前阻塞",
+                    reason="嘗試直接換目標",
+                )
+            with self.assertRaisesRegex(ValueError, "story intervention required"):
+                store.adjudicate_action(
+                    "room-a", "alice", "繼續搜索", decision="accepted",
+                    basis="仍在場景內", reason="繼續嘗試",
+                )
+
+    def test_objective_replacement_cannot_discard_stalled_or_pending_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.adjudicate_action(
+                "room-a", "alice", "搜索房間", decision="accepted",
+                basis="場景允許", reason="一般搜索",
+            )
+            with self.assertRaisesRegex(ValueError, "pending.*action"):
+                store.set_story_objective(
+                    "room-a", chapter="第二章", objective="直接去碼頭",
+                    reason="嘗試換目標",
+                )
+            store.record_story_progress(
+                "room-a", status="stalled", reason="沒有新發現",
+            )
+            with self.assertRaisesRegex(ValueError, "stalled action"):
+                store.set_story_objective(
+                    "room-a", chapter="第二章", objective="直接去碼頭",
+                    reason="嘗試換目標",
+                )
+
+    def test_rejected_action_does_not_require_progress_or_trigger_intervention(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.adjudicate_action(
+                "room-a", "alice", "穿牆進地下室", decision="rejected",
+                basis="角色沒有穿牆能力", reason="目前不可能執行",
+            )
+
+            self.assertIsNone(store.get_story_progress("room-a")["pending_action_event_id"])
+            with self.assertRaisesRegex(ValueError, "unassessed player action"):
+                store.record_story_progress(
+                    "room-a", status="stalled", reason="行動被拒絕",
+                )
+
+    def test_story_intervention_resets_stagnation_and_allows_play_to_continue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            for index in range(3):
+                store.adjudicate_action(
+                    "room-a", "alice", f"在原地搜索 {index}", decision="accepted",
+                    basis="場景允許", reason="一般搜索",
+                )
+                store.record_story_progress(
+                    "room-a", status="stalled", reason="沒有推進目前目標",
+                )
+
+            intervention = store.intervene_story(
+                "room-a",
+                event="停電後，地下室入口傳來撞擊聲並自行打開",
+                intended_progress="把玩家帶往地下室入口",
+                reason="連續三次玩家行動沒有推進劇情",
+            )
+
+            self.assertFalse(intervention["intervention_required"])
+            self.assertEqual(intervention["stagnant_action_count"], 0)
+            accepted = store.adjudicate_action(
+                "room-a", "alice", "我走向打開的入口", decision="accepted",
+                basis="入口已由介入事件打開", reason="可前往下一場景",
+            )
+            self.assertEqual(accepted["decision"], "accepted")
+            self.assertEqual(store.list_events("room-a")[-2]["kind"], "story_intervention")
+
+    def test_advancing_the_objective_resets_stagnant_action_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            for index in range(2):
+                store.adjudicate_action(
+                    "room-a", "alice", f"搜索牆面 {index}", decision="accepted",
+                    basis="場景允許", reason="一般搜索",
+                )
+                store.record_story_progress(
+                    "room-a", status="stalled", reason="仍未找到入口",
+                )
+            store.adjudicate_action(
+                "room-a", "alice", "拉下隱藏拉桿", decision="accepted",
+                basis="已找到機關", reason="能開啟入口",
+            )
+
+            progress = store.record_story_progress(
+                "room-a", status="advanced", reason="地下室入口已開啟",
+            )
+
+            self.assertEqual(progress["stagnant_action_count"], 0)
+            self.assertFalse(progress["intervention_required"])
 
     def test_unavailable_character_action_is_forced_rejected_until_reenabled(self):
         with tempfile.TemporaryDirectory() as directory:

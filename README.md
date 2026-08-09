@@ -101,7 +101,7 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 使用 `/skill:trpg-gm` 後，每個遊戲回合都會看到 `TRPG GM Guard` checklist；agent 也會取得 typed gameplay tools、raw fallback `trpg_gm_cli` 與 `trpg_turn_finalize`。Extension 會：
 
 1. 在 `before_agent_start` 注入當回合檢查表。
-2. 優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
+2. 優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
 3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；DB guardrail 命中時會把錯誤的 `accepted` 強制改成 `rejected`。被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
 4. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
 5. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
@@ -113,6 +113,12 @@ Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Pyt
 每次 `context` 都包含持久化的 `participation` 摘要：各角色累積行動、已接受行動、最後行動事件、目前是否能行動，以及 `next_spotlight_character_ids`。GM 在下一個自然決策點必須優先邀請累積參與較少且仍能行動的玩家，不能讓最積極的單一玩家長期壟斷劇情。多人仍可行動時，`trpg_turn_finalize` 會要求 `nextSpotlightCharacterId`，且只接受重新計算後優先名單中的角色。
 
 HP 為 0 的角色會自動排除。其他確定的昏迷、束縛、石化或離場狀態，必須透過 `trpg_gm_character_availability` 保存原因；狀態解除後恢復 `canAct=true`。SQLite 核心會拒絕目前不能行動角色的不可能行動。這裡追蹤的是平等的「有意義參與機會」，不允許 GM 為湊數代替玩家宣告行動。
+
+### 防止劇情原地打轉
+
+`context.story_progress` 會保存目前章節、具體目標與連續未推進的玩家 action 數。每個 accepted action 裁定後，GM 必須保存 `advanced` 或 `stalled` 與理由；rejected action 不改變世界，因此不進入此時鐘。連續第三次 `stalled` 時，SQLite 核心會拒絕第四個 action，也禁止直接更換 objective 清零；Pi finalizer 同時要求先使用 `trpg_gm_story_intervene` 保存具體的世界事件與預期推進方向。
+
+介入事件應提供新壓力、可見線索、NPC 主動行為或環境改變，使玩家能朝下一章／目標前進；它不能代替玩家角色決策、保證成功、洩漏秘密或改寫 canon。成功介入後停滯計數歸零。
 
 ### 3. 安裝到 OpenAI Codex CLI／IDE
 
@@ -369,7 +375,7 @@ Extension 使用 Pi lifecycle API：
 
 - `input`：辨識明確的 `/skill:trpg-gm`、要求 agent 當 GM／主持冒險，以及 TRPG 開團／續團遊戲請求，啟用 session guard；只討論或修改 `trpg-gm` 程式碼與 README 不會啟用。
 - `before_agent_start`：每回合注入 context、狀態保存、秘密資訊及玩家自主權 checklist。
-- Typed gameplay tools：`trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 使用命名欄位與 JSON object，避免模型漏掉 `adjudicate`、room、entity name、傳入非法 decision 或組出壞 JSON。
+- Typed gameplay tools：`trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 使用命名欄位與 JSON object，避免模型漏掉 `adjudicate`、room、entity name、傳入非法 decision 或組出壞 JSON。
 - Raw `trpg_gm_cli` fallback：只供 typed tools 尚未涵蓋的 setup/query；以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens。所有工具都在成功後才記錄 exact room、context、玩家行動裁定、check 與 mutation；失敗不更新 guard 狀態。
 - `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，排入一次 follow-up，讓 agent 補完而不是無限重試。
 - Session custom entry：保存 guard 已啟用狀態，使 `/reload` 或 resume 後仍可恢復。

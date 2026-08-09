@@ -127,6 +127,23 @@ def build_parser() -> argparse.ArgumentParser:
     adjudicate.add_argument("--basis", required=True)
     adjudicate.add_argument("--reason", required=True)
 
+    story = commands.add_parser("story")
+    story_commands = story.add_subparsers(dest="action", required=True)
+    story_objective = story_commands.add_parser("objective")
+    story_objective.add_argument("room_id")
+    story_objective.add_argument("--chapter", required=True)
+    story_objective.add_argument("--objective", required=True)
+    story_objective.add_argument("--reason", required=True)
+    story_progress = story_commands.add_parser("progress")
+    story_progress.add_argument("room_id")
+    story_progress.add_argument("--status", choices=("advanced", "stalled"), required=True)
+    story_progress.add_argument("--reason", required=True)
+    story_intervene = story_commands.add_parser("intervene")
+    story_intervene.add_argument("room_id")
+    story_intervene.add_argument("--event", required=True)
+    story_intervene.add_argument("--intended-progress", required=True)
+    story_intervene.add_argument("--reason", required=True)
+
     check = commands.add_parser("check")
     check.add_argument("room_id")
     check.add_argument("character_id")
@@ -222,6 +239,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.player_action,
             decision=args.decision,
             basis=args.basis,
+            reason=args.reason,
+        )
+    elif args.command == "story" and args.action == "objective":
+        result = store.set_story_objective(
+            args.room_id,
+            chapter=args.chapter,
+            objective=args.objective,
+            reason=args.reason,
+        )
+    elif args.command == "story" and args.action == "progress":
+        result = store.record_story_progress(
+            args.room_id, status=args.status, reason=args.reason
+        )
+    elif args.command == "story" and args.action == "intervene":
+        result = store.intervene_story(
+            args.room_id,
+            event=args.event,
+            intended_progress=args.intended_progress,
             reason=args.reason,
         )
     elif args.command == "check":

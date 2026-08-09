@@ -19,7 +19,24 @@ function createFakePi() {
     execResult: { code: 0, stdout: '{"ok":true}', stderr: "", killed: false },
     async exec(command, args) {
       execCalls.push({ command, args });
-      return this.execResult;
+      const result = this.execResult;
+      if (args.includes("context") && !this.preserveMalformedContext && result.code === 0) {
+        try {
+          const value = JSON.parse(result.stdout);
+          if (!value.story_progress) {
+            value.story_progress = {
+              chapter: "目前章節",
+              objective: "推進目前場景目標",
+              stagnant_action_count: 0,
+              intervention_required: false,
+            };
+            return { ...result, stdout: JSON.stringify(value) };
+          }
+        } catch {
+          // Tests that need malformed context set preserveMalformedContext.
+        }
+      }
+      return result;
     },
     on(name, handler) {
       handlers.set(name, handler);
@@ -94,6 +111,23 @@ const runAction = async (pi, {
   }
 };
 
+const runProgress = async (pi, db = null, status = "advanced") => {
+  const original = pi.execResult;
+  const progressDb = db ?? pi.execCalls.find((call) => call.args.includes("context"))?.args[1] ?? "/tmp/game.db";
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    chapter: "目前章節", objective: "推進目前場景目標",
+    stagnant_action_count: status === "stalled" ? 1 : 0,
+    intervention_required: false,
+  }), stderr: "", killed: false };
+  try {
+    return await pi.tools.get("trpg_gm_story_progress").execute("progress", {
+      db: progressDb, room: "room-a", status, reason: "測試中記錄本次 action 的劇情推進",
+    });
+  } finally {
+    pi.execResult = original;
+  }
+};
+
 test("package manifest exposes both the Pi skill and extension", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url)));
   assert.deepEqual(manifest.pi.skills, ["./.agents/skills/trpg-gm"]);
@@ -155,6 +189,157 @@ test("skill requires persistent equal spotlight for every eligible player", asyn
   }
 });
 
+test("finalizer requires progress assessment and forced intervention after three stalled actions", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我再次搜索大廳", source: "interactive" }, ctx,
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: { characters: [{ character_id: "alice", can_act: true, action_count: 2 }] },
+    story_progress: {
+      chapter: "第一章", objective: "找到地下室入口",
+      stagnant_action_count: 2, intervention_required: false,
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await runAction(pi, {
+    characterId: "alice", action: "我再次搜索大廳", db: "/tmp/game.db",
+  });
+
+  await assert.rejects(
+    pi.tools.get("trpg_turn_finalize").execute("finalize", {
+      turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+      stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+    }),
+    /record whether.*advanced or stalled/i,
+  );
+
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    chapter: "第一章", objective: "找到地下室入口",
+    stagnant_action_count: 3, intervention_required: true,
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_story_progress").execute("progress", {
+    db: "/tmp/game.db", room: "room-a", status: "stalled",
+    reason: "仍然沒有新線索",
+  });
+  await assert.rejects(
+    pi.tools.get("trpg_turn_finalize").execute("finalize", {
+      turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+      stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+    }),
+    /introduce.*event/i,
+  );
+
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    chapter: "第一章", objective: "找到地下室入口",
+    stagnant_action_count: 0, intervention_required: false,
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_story_intervene").execute("intervene", {
+    db: "/tmp/game.db", room: "room-a",
+    event: "地下室傳出撞擊聲，暗門打開",
+    intendedProgress: "引導玩家前往地下室",
+    reason: "三次玩家行動未推進劇情",
+  });
+  await pi.tools.get("trpg_turn_finalize").execute("finalize", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+    stateChanges: ["地下室暗門已由突發事件打開"],
+    secretsChecked: true, playerAgencyChecked: true,
+  });
+});
+
+test("progress recorded before the current action cannot assess that new action", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我檢查剛出現的暗門", source: "interactive" }, ctx,
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: { characters: [{ character_id: "alice", can_act: true, action_count: 1 }] },
+    story_progress: {
+      chapter: "第一章", objective: "找到入口",
+      stagnant_action_count: 0, intervention_required: false,
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await pi.tools.get("trpg_gm_story_progress").execute("old-progress", {
+    db: "/tmp/game.db", room: "room-a", status: "advanced", reason: "上一個 action 已推進",
+  });
+  await runAction(pi, {
+    characterId: "alice", action: "我檢查剛出現的暗門", db: "/tmp/game.db",
+  });
+
+  await assert.rejects(
+    pi.tools.get("trpg_turn_finalize").execute("finalize", {
+      turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+      stateChanges: [], secretsChecked: true, playerAgencyChecked: true,
+    }),
+    /record whether.*advanced or stalled/i,
+  );
+});
+
+test("context rejects missing persistent story progress", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "繼續 TRPG", source: "interactive" }, ctx,
+  );
+  pi.preserveMalformedContext = true;
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: { characters: [] },
+  }), stderr: "", killed: false };
+
+  await assert.rejects(
+    pi.tools.get("trpg_gm_context").execute("context", {
+      db: "/tmp/game.db", room: "room-a",
+    }),
+    /context.*story_progress|story progress.*context/i,
+  );
+});
+
+test("story progress tools reject malformed successful CLI output", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "更新劇情進度", source: "interactive" }, ctx,
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: { characters: [] },
+    story_progress: {
+      chapter: "第一章", objective: "找到入口",
+      stagnant_action_count: 0, intervention_required: false,
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  for (const stdout of [
+    '{"ok":true}',
+    '{"objective":"找到入口"}',
+    '{"chapter":"第一章","objective":"找到入口","stagnant_action_count":-1,"intervention_required":false}',
+    '{"chapter":"第一章","objective":"找到入口","stagnant_action_count":1.5,"intervention_required":false}',
+    '{"chapter":"第一章","objective":"找到入口","stagnant_action_count":3}',
+    '{"chapter":"第一章","objective":"找到入口","stagnant_action_count":3,"intervention_required":false}',
+    '{"chapter":"第一章","objective":"找到入口","stagnant_action_count":2,"intervention_required":true}',
+  ]) {
+    pi.execResult = { code: 0, stdout, stderr: "", killed: false };
+    await assert.rejects(
+      pi.tools.get("trpg_gm_story_progress").execute("progress", {
+        db: "/tmp/game.db", room: "room-a", status: "advanced", reason: "找到入口",
+      }),
+      /story progress.*invalid|omitted/i,
+    );
+  }
+});
+
 test("structured CLI tool description teaches action enum and exact player text", () => {
   const pi = createFakePi();
   trpgGuard(pi);
@@ -171,6 +356,7 @@ test("dedicated gameplay tools expose typed parameters instead of raw CLI tokens
     "trpg_gm_context", "trpg_gm_action_adjudicate", "trpg_gm_check",
     "trpg_gm_entity_upsert", "trpg_gm_character_adjust", "trpg_gm_canon_set",
     "trpg_gm_recap_save", "trpg_gm_character_availability",
+    "trpg_gm_story_objective", "trpg_gm_story_progress", "trpg_gm_story_intervene",
   ]) {
     assert.ok(pi.tools.has(name), `${name} must be registered`);
   }
@@ -285,6 +471,7 @@ test("HP depletion refreshes finalizer spotlight eligibility", async () => {
     db: "/tmp/game.db", room: "room-a",
   });
   await runAction(pi, { characterId: "alice", action: "我擋在鮑伯前方承受衝擊", db: "/tmp/game.db" });
+  await runProgress(pi);
   pi.execResult = { code: 0, stdout: '{"id":"bob","hp":0}', stderr: "", killed: false };
   await pi.tools.get("trpg_gm_character_adjust").execute("adjust", {
     db: "/tmp/game.db", room: "room-a", character: "bob",
@@ -322,6 +509,7 @@ test("dedicated gameplay tools build exact CLI calls and share turn tracking", a
     action: "我仔細檢查門縫", decision: "accepted",
     basis: "scene:door", reason: "角色可以接近門縫",
   });
+  await runProgress(pi, pi.execCalls[0].args[1]);
 
   pi.execResult = { code: 0, stdout: JSON.stringify({
     character_id: "pc", stat: "偵查", roll: 31, target: 60, degree: "success",
@@ -338,6 +526,7 @@ test("dedicated gameplay tools build exact CLI calls and share turn tracking", a
   assert.deepEqual(pi.execCalls.map((call) => call.args.slice(2)), [
     ["context", "room-a", "--events", "30"],
     ["action", "adjudicate", "room-a", "pc", "我仔細檢查門縫", "--decision", "accepted", "--basis", "scene:door", "--reason", "角色可以接近門縫"],
+    ["story", "progress", "room-a", "--status", "advanced", "--reason", "測試中記錄本次 action 的劇情推進"],
     ["check", "room-a", "pc", "偵查"],
     ["entity", "room-a", "clue", "fiber", "門縫纖維", "--state", '{"discovered":true,"turn":3}'],
   ]);
@@ -482,6 +671,7 @@ test("action tracking accepts argparse options before positionals", async () => 
     "--basis", "場景允許", "--reason", "一般調查能力",
     "room-a", "pc", "調查門縫",
   ]);
+  await runProgress(pi);
 
   const result = await pi.tools.get("trpg_turn_finalize").execute("option-order", {
     turnKind: "gameplay",
@@ -516,6 +706,7 @@ test("action tracking handles inline argparse option assignments", async () => {
     "--basis=場景允許", "--reason=一般調查能力",
     "room-a", "pc", "調查門縫",
   ]);
+  await runProgress(pi);
 
   const result = await pi.tools.get("trpg_turn_finalize").execute("inline-options", {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
@@ -590,6 +781,7 @@ test("finalizer rejects a turn without context or persisted state accounting", a
 
   await runCli(pi, ["context", "room-a"]);
   await runAction(pi);
+  await runProgress(pi);
   await runCli(pi, ["check", "room-a", "pc", "觀察"]);
 
   await assert.rejects(
@@ -627,6 +819,7 @@ test("finalizer requires the least-participating eligible player as next spotlig
     db: "/tmp/game.db", room: "room-a",
   });
   await runAction(pi, { characterId: "alice", action: "我檢查門縫", db: "/tmp/game.db" });
+  await runProgress(pi);
   const finalize = pi.tools.get("trpg_turn_finalize");
   const base = {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
@@ -652,6 +845,7 @@ test("successful finalization prevents follow-up reminders", async () => {
   );
   await runCli(pi, ["context", "room-a"]);
   await runAction(pi);
+  await runProgress(pi);
   for (const args of [
     ["check", "room-a", "pc", "觀察"],
     ["entity", "room-a", "clue", "c1", "線索", "--state", "{}"],
@@ -1148,6 +1342,7 @@ test("final player-facing answer reports every resolved check canonically", asyn
   );
   await runCli(pi, ["context", "room-a"]);
   await runAction(pi);
+  await runProgress(pi);
 
   pi.execResult = {
     code: 0,

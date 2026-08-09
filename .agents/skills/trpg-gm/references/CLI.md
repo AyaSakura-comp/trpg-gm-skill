@@ -129,6 +129,30 @@ $GM --db "$DB" character availability my-room alice \
 
 `--can-act` is exactly `true` or `false`, and every change requires an auditable reason. HP at 0 also makes a character automatically ineligible. `context.participation` reports action counts, eligibility, and `next_spotlight_character_ids`: the currently eligible characters with the fewest adjudicated actions. GM must prefer those characters at the next natural decision point so every player receives equal meaningful opportunities. A persisted unavailable character is temporarily excluded; an attempted action while unavailable is mechanically forced to `rejected` until availability is restored.
 
+## Story objective, progress, and forced intervention
+
+Set a concrete chapter objective, then assess every countable player action:
+
+```bash
+$GM --db "$DB" story objective my-room \
+  --chapter '第一章' --objective '找到地下室入口' --reason 'scenario.md#chapter-1'
+$GM --db "$DB" story progress my-room \
+  --status stalled --reason '重複搜索沒有產生新線索或開啟新路徑'
+$GM --db "$DB" story progress my-room \
+  --status advanced --reason '暗門已被發現，目前目標已實質推進'
+```
+
+`context.story_progress` reports the current chapter/objective, `stagnant_action_count`, and `intervention_required`. `advanced` resets the counter; `stalled` increments it. Only accepted actions enter this clock; rejected actions and availability-/guardrail-enforced rejections are excluded. After the third consecutive stalled action, no fourth action or objective replacement is allowed until the GM persists a concrete in-world intervention:
+
+```bash
+$GM --db "$DB" story intervene my-room \
+  --event '停電後，地下室入口傳來撞擊聲並自行打開' \
+  --intended-progress '把下一個決策點帶到地下室入口' \
+  --reason '連續三次玩家行動未推進目前目標'
+```
+
+The intervention resets stagnation, but it must not choose a player-character action, silently rewrite canon, leak secrets, or guarantee success. It creates a new pressure, clue, opening, NPC move, or environmental change that gives players a meaningful route toward the next chapter or objective.
+
 ## Player action adjudication
 
 Every declared in-world player action must be adjudicated before a check or world-state mutation:
