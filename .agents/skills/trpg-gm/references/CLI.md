@@ -136,13 +136,22 @@ Set a concrete chapter objective, then assess every countable player action:
 ```bash
 $GM --db "$DB" story objective my-room \
   --chapter '第一章' --objective '找到地下室入口' --reason 'scenario.md#chapter-1'
+
+# 創角剛完成時，ID 必須精確匹配 context.story_progress.opening_character_ids；
+# reason 必須逐一包含各角色已保存的背景或概念原文：
+$GM --db "$DB" story objective my-room \
+  --chapter '第一章：失蹤案' --objective '從匿名信追查失蹤記者' \
+  --reason '依 alice 的地方報社記者背景與 bob 的大學檔案室研究員背景開場' \
+  --opening-character-ids '["alice","bob"]'
 $GM --db "$DB" story progress my-room \
   --status stalled --reason '重複搜索沒有產生新線索或開啟新路徑'
 $GM --db "$DB" story progress my-room \
   --status advanced --reason '暗門已被發現，目前目標已實質推進'
 ```
 
-`context.story_progress` reports the current chapter/objective, `stagnant_action_count`, and `intervention_required`. `advanced` resets the counter; `stalled` increments it. Only accepted actions enter this clock; rejected actions and availability-/guardrail-enforced rejections are excluded. After the third consecutive stalled action, no fourth action or objective replacement is allowed until the GM persists a concrete in-world intervention:
+`context.story_progress` reports the current chapter/objective, `opening_guidance_required`, `opening_character_ids`, `stagnant_action_count`, and `intervention_required`. A successful `creation roll` adds that character to `opening_character_ids`; before any player action, set `story objective` after the final generated character, pass the exact complete ID list through `--opening-character-ids`, and cite each saved background or concept verbatim in `--reason`. This clears `opening_guidance_required`. The GM must describe only player-visible world context and invite the first action, never decide a player character's motive, speech, movement, or reaction.
+
+After opening guidance, `advanced` resets the counter; `stalled` increments it. Only accepted actions enter this clock; rejected actions and availability-/guardrail-enforced rejections are excluded. After the third consecutive stalled action, no fourth action or objective replacement is allowed until the GM persists a concrete in-world intervention:
 
 ```bash
 $GM --db "$DB" story intervene my-room \

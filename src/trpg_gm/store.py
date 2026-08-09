@@ -859,6 +859,11 @@ class GameStore:
             "objective": "推進至劇本下一章或目前場景目標",
             "reason": "room default",
         }
+        opening_character_ids = list(dict.fromkeys(
+            event["payload"]["character_id"]
+            for event in room_events
+            if event["id"] > objective_event_id and event["kind"] == "character_generated"
+        ))
         stagnant_action_count = 0
         assessed_action_ids: set[int] = set()
         last_progress_event_id = None
@@ -886,6 +891,8 @@ class GameStore:
             "chapter": objective_payload["chapter"],
             "objective": objective_payload["objective"],
             "objective_reason": objective_payload["reason"],
+            "opening_guidance_required": bool(opening_character_ids),
+            "opening_character_ids": opening_character_ids,
             "stagnant_action_count": stagnant_action_count,
             "stagnation_limit": 3,
             "intervention_required": stagnant_action_count >= 3,
@@ -894,7 +901,13 @@ class GameStore:
         }
 
     def set_story_objective(
-        self, room_id: str, *, chapter: str, objective: str, reason: str
+        self,
+        room_id: str,
+        *,
+        chapter: str,
+        objective: str,
+        reason: str,
+        opening_character_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         if self.get_room(room_id) is None:
             raise KeyError(f"unknown room: {room_id}")
@@ -905,10 +918,27 @@ class GameStore:
             raise ValueError("cannot replace the story objective after a stalled action; advance it or intervene")
         if not chapter.strip() or not objective.strip() or not reason.strip():
             raise ValueError("chapter, objective, and reason must not be empty")
+        pending_opening_ids = current_progress["opening_character_ids"]
+        supplied_opening_ids = opening_character_ids or []
+        if current_progress["opening_guidance_required"]:
+            if set(supplied_opening_ids) != set(pending_opening_ids) or len(
+                supplied_opening_ids
+            ) != len(pending_opening_ids):
+                raise ValueError("opening character IDs must exactly match the pending generated characters")
+            for character_id in pending_opening_ids:
+                character = self.get_character(room_id, character_id)
+                references = [character["background"].strip(), character["concept"].strip()]
+                if not any(reference and reference in reason for reference in references):
+                    raise ValueError(
+                        f"opening reason must cite the saved background or concept for {character_id}"
+                    )
+        elif supplied_opening_ids:
+            raise ValueError("opening character IDs are only valid when opening guidance is required")
         payload = {
             "chapter": chapter.strip(),
             "objective": objective.strip(),
             "reason": reason.strip(),
+            "opening_character_ids": supplied_opening_ids,
         }
         with self._connect() as db:
             self._append_event(db, room_id, "story_objective_set", payload)
@@ -979,6 +1009,11 @@ class GameStore:
         if self.get_character(room_id, character_id) is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
         story_progress = self.get_story_progress(room_id)
+        if story_progress["opening_guidance_required"]:
+            raise ValueError(
+                "guide the story background from the generated character background "
+                "before accepting another player action"
+            )
         if story_progress["pending_action_event_id"] is not None:
             raise ValueError(
                 "an unassessed player action must be recorded as advanced or stalled "
@@ -1027,6 +1062,8 @@ class GameStore:
         character = self.get_character(room_id, character_id)
         if character is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
+        if self.get_story_progress(room_id)["opening_guidance_required"]:
+            raise ValueError("guide the story background before resolving a check")
         participant = next(
             item for item in self._get_participation(room_id)["characters"]
             if item["character_id"] == character_id

@@ -36,6 +36,8 @@ Ask the player for name, appearance, background, concept, and skills. Offer reco
 
 Show all raw rolls and generated values. Skill d100 rolls map into the configured ability range. HP/MP/SAN maxima use their configured dice and are bounded by `max_party_difference` against every existing party member; never secretly reroll a weak or strong result. Preserve appearance, background, concept, drafts, rolls, final skills, and maxima in SQLite for later sessions.
 
+Immediately after character generation, prioritize connecting play to those persisted backgrounds. Set a concrete opening chapter/objective, pass the exact pending `opening_character_ids`, and make its reason cite each relevant saved character background or concept verbatim, then frame the player-visible era, place, immediate event, and hook. Stop before choosing any player-character motive, speech, movement, reaction, or acceptance of a quest; ask the player for the first action instead. `context.story_progress.opening_guidance_required` remains true, and new actions are blocked, until that opening objective is persisted.
+
 ## Equal player participation
 
 Every player must receive equal access to meaningful choices, dialogue, investigation, and action. At each scene transition or natural decision point, inspect `context.participation` and prefer characters listed in `next_spotlight_character_ids`; they are the eligible characters with the fewest recorded action attempts. Do not repeatedly center the most assertive player, and do not treat quietness, low skill, or failed checks as permission to skip someone. Offering spotlight never authorizes the GM to choose or narrate that player's action.

@@ -447,6 +447,87 @@ class GameStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "maximum"):
                 store.adjust_resource("room-a", "bob", "hp", 1, "超額治療")
 
+    def test_generated_character_requires_story_background_guidance_before_play(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7", script_path="scenario.md")
+            store.configure_character_creation(
+                "room-a",
+                {
+                    "skill_count": 1,
+                    "allowed_skills": ["偵查"],
+                    "recommended_skills": ["偵查"],
+                    "skill_min": 20,
+                    "skill_max": 80,
+                    "resources": {
+                        "hp": {"base": 8, "die": 6, "max_party_difference": 2},
+                        "mp": {"base": 6, "die": 6, "max_party_difference": 2},
+                        "san": {"base": 45, "die": 30, "max_party_difference": 10},
+                    },
+                },
+                basis="scenario.md#investigators",
+            )
+            store.propose_character(
+                "room-a", "alice", "艾莉絲",
+                appearance="黑髮記者", background="地方報社記者",
+                concept="追查失蹤案的記者", skills=["偵查"],
+                decision="accepted", basis="符合劇本", reason="角色適合調查故事",
+            )
+            store.roll_character_creation(
+                "room-a", "alice",
+                rolls={"skills": {"偵查": 50}, "hp": 1, "mp": 1, "san": 1},
+            )
+
+            progress = store.get_context("room-a")["story_progress"]
+            self.assertTrue(progress["opening_guidance_required"])
+            self.assertEqual(progress["opening_character_ids"], ["alice"])
+            with self.assertRaisesRegex(ValueError, "story background.*before.*action"):
+                store.adjudicate_action(
+                    "room-a", "alice", "我開始調查", decision="accepted",
+                    basis="角色可以調查", reason="一般調查行動",
+                )
+            with self.assertRaisesRegex(ValueError, "story background.*before.*check"):
+                store.record_check("room-a", "alice", "偵查", roll=40)
+            with self.assertRaisesRegex(ValueError, "opening character IDs"):
+                store.set_story_objective(
+                    "room-a", chapter="第一章：失蹤記者",
+                    objective="從報社收到的匿名信追查失蹤案",
+                    reason="未明確引用角色開場依據",
+                )
+
+            progress = store.set_story_objective(
+                "room-a", chapter="第一章：失蹤記者",
+                objective="從報社收到的匿名信追查失蹤案",
+                reason="依艾莉絲的地方報社記者背景引導故事開場",
+                opening_character_ids=["alice"],
+            )
+
+            self.assertFalse(progress["opening_guidance_required"])
+            ruling = store.adjudicate_action(
+                "room-a", "alice", "我閱讀匿名信", decision="accepted",
+                basis="匿名信已成為故事開場鉤子", reason="角色可以閱讀收到的信",
+            )
+            self.assertEqual(ruling["decision"], "accepted")
+            store.record_story_progress(
+                "room-a", status="stalled", reason="閱讀後尚未找到匿名信來源",
+            )
+            store.propose_character(
+                "room-a", "bob", "鮑伯",
+                appearance="戴眼鏡的研究員", background="大學檔案室研究員",
+                concept="協助追查舊報紙紀錄", skills=["偵查"],
+                decision="accepted", basis="符合劇本", reason="角色適合調查故事",
+            )
+            store.roll_character_creation(
+                "room-a", "bob",
+                rolls={"skills": {"偵查": 50}, "hp": 2, "mp": 2, "san": 2},
+            )
+            with self.assertRaisesRegex(ValueError, "cannot replace.*stalled action"):
+                store.set_story_objective(
+                    "room-a", chapter="重新開場", objective="跳過目前停滯",
+                    reason="依大學檔案室研究員背景重新開場",
+                    opening_character_ids=["bob"],
+                )
+
     def test_character_creation_rejects_trimmed_duplicate_skills_and_malformed_rolls(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.sqlite3")

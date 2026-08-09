@@ -134,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     story_objective.add_argument("--chapter", required=True)
     story_objective.add_argument("--objective", required=True)
     story_objective.add_argument("--reason", required=True)
+    story_objective.add_argument("--opening-character-ids", type=_json_list)
     story_progress = story_commands.add_parser("progress")
     story_progress.add_argument("room_id")
     story_progress.add_argument("--status", choices=("advanced", "stalled"), required=True)
@@ -247,6 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             chapter=args.chapter,
             objective=args.objective,
             reason=args.reason,
+            opening_character_ids=args.opening_character_ids,
         )
     elif args.command == "story" and args.action == "progress":
         result = store.record_story_progress(

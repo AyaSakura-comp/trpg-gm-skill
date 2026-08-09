@@ -253,6 +253,10 @@ function parseStoryProgress(stdout) {
       || !progress.chapter.trim()
       || typeof progress.objective !== "string"
       || !progress.objective.trim()
+      || typeof progress.opening_guidance_required !== "boolean"
+      || !Array.isArray(progress.opening_character_ids)
+      || progress.opening_character_ids.some((id) => !String(id).trim())
+      || progress.opening_guidance_required !== (progress.opening_character_ids.length > 0)
       || !Number.isInteger(progress.stagnant_action_count)
       || progress.stagnant_action_count < 0
       || typeof progress.intervention_required !== "boolean"
@@ -261,6 +265,8 @@ function parseStoryProgress(stdout) {
     return {
       chapter: progress.chapter,
       objective: progress.objective,
+      openingGuidanceRequired: progress.opening_guidance_required,
+      openingCharacterIds: progress.opening_character_ids.map(String),
       stagnantActionCount: progress.stagnant_action_count,
       interventionRequired: progress.intervention_required,
     };
@@ -290,6 +296,7 @@ function freshTurn() {
     storyProgress: null,
     storyProgressRecorded: false,
     storyInterventionPersisted: false,
+    openingGuidanceRequired: false,
     actionNeedsProgress: false,
     operationIndex: 0,
     latestActionIndex: null,
@@ -322,7 +329,7 @@ function checklist() {
     "6. Use turnKind=clarification only when you must ask for a missing room/setup choice before gameplay; otherwise use gameplay.",
     "7. If a check caused no persistent change, explain why in noStateChangeReason; never use that field to avoid saving a discovered clue.",
     "8. Before resolving a declared player action, adjudicate it with trpg_gm_cli action adjudicate against the script, canon, rules, and established state. Reject unsupported or impossible actions with a concrete basis and reason; do not roll or mutate state for a rejected action.",
-    "9. During character creation, configure scenario-grounded allowed/recommended skills and party fairness first; persist appearance, background, concept, chosen skills, and accepted/rejected ruling before rolling abilities and HP/MP/SAN maxima.",
+    "9. During character creation, configure scenario-grounded allowed/recommended skills and party fairness first; persist appearance, background, concept, chosen skills, and accepted/rejected ruling before rolling abilities and HP/MP/SAN maxima. After generation, prioritize an opening based on the character background: persist a concrete chapter/objective, introduce only the world situation, and invite the player to decide their first action.",
     "10. Read the immutable persistent guardrails returned by context before adjudication. A matching guardrail overrides an attempted acceptance to rejected; never paraphrase the action or submit a second ruling to bypass it. During setup, derive guardrail terms and paraphrase aliases from explicit scenario prohibitions with guardrail add.",
     "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
     "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
@@ -424,6 +431,9 @@ export default function trpgGmGuard(pi) {
     ) {
       throw new Error(`All turn operations must use the same exact room as context: ${turn.contextRoom}.`);
     }
+    if (operation.action && turn.openingGuidanceRequired) {
+      throw new Error("Guide the story background and persist its opening objective before accepting a player action.");
+    }
     if (operation.action && turn.actionAdjudications.length > 0) {
       throw new Error("Only one successful action adjudication is allowed per turn; do not rewrite or re-submit a rejected player action.");
     }
@@ -476,6 +486,7 @@ export default function trpgGmGuard(pi) {
       turn.contextDb = dbKey;
       turn.participation = parseParticipation(result.stdout);
       turn.storyProgress = storyProgress;
+      turn.openingGuidanceRequired = storyProgress.openingGuidanceRequired;
     }
     if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
     if (operation.characterProposal) {
@@ -483,6 +494,7 @@ export default function trpgGmGuard(pi) {
     }
     if (operation.characterGenerated) {
       turn.characterGenerations.push(parseCharacterGeneration(result.stdout));
+      turn.openingGuidanceRequired = true;
     }
     if (operation.availability) {
       const participant = turn.participation?.find(
@@ -518,11 +530,26 @@ export default function trpgGmGuard(pi) {
       }
     }
     if (operation.storyOperation) {
-      const storyProgress = parseStoryProgress(result.stdout);
+      let storyProgress = parseStoryProgress(result.stdout);
       if (!storyProgress) {
         throw new Error("Successful story progress operation returned invalid or omitted progress fields.");
       }
+      if (operation.storyOperation === "objective") {
+        const verification = await pi.exec(
+          CLI_WRAPPER,
+          ["--db", params.db, "context", operation.operationRoom],
+          { signal },
+        );
+        if (verification.code !== 0) {
+          throw new Error(verification.stderr || verification.stdout || "Failed to verify persisted story objective.");
+        }
+        storyProgress = parseStoryProgress(verification.stdout);
+        if (!storyProgress) {
+          throw new Error("Story objective verification context omitted valid persistent story_progress fields.");
+        }
+      }
       turn.storyProgress = storyProgress;
+      turn.openingGuidanceRequired = storyProgress.openingGuidanceRequired;
       if (operation.storyOperation === "progress") turn.storyProgressRecorded = true;
       if (operation.storyOperation === "intervene") turn.storyInterventionPersisted = true;
     }
@@ -727,20 +754,25 @@ export default function trpgGmGuard(pi) {
   registerTypedTool({
     name: "trpg_gm_story_objective",
     label: "TRPG Story Objective",
-    description: "Persist the current chapter and concrete objective that play must move toward.",
+    description: "Persist the current chapter and concrete objective. After character generation, pass every pending opening character ID and cite each saved background or concept in reason before inviting the first action.",
     parameters: {
       type: "object", additionalProperties: false,
       required: ["db", "room", "chapter", "objective", "reason"],
       properties: {
         ...dbRoomProperties, chapter: { type: "string" },
         objective: { type: "string" }, reason: { type: "string" },
+        openingCharacterIds: { type: "array", items: { type: "string" }, uniqueItems: true },
       },
     },
     async execute(_id, params, signal) {
-      return executeCli({ db: params.db, args: [
+      const args = [
         "story", "objective", params.room, "--chapter", params.chapter,
         "--objective", params.objective, "--reason", params.reason,
-      ] }, signal);
+      ];
+      if (params.openingCharacterIds !== undefined) {
+        args.push("--opening-character-ids", JSON.stringify(params.openingCharacterIds));
+      }
+      return executeCli({ db: params.db, args }, signal);
     },
   });
 
@@ -892,6 +924,11 @@ export default function trpgGmGuard(pi) {
       }
       if (!turn.contextLoaded || turn.contextRoom !== params.roomId) {
         throw new Error(`TRPG turn is not ready: run trpg-gm context for the exact room ${params.roomId}; last loaded room was ${turn.contextRoom ?? "none"}.`);
+      }
+      if (turn.openingGuidanceRequired) {
+        throw new Error(
+          "After character generation, persist a concrete story objective based on the character's story background before finalizing or accepting play.",
+        );
       }
       if (turn.actionNeedsProgress && !turn.storyProgressRecorded) {
         throw new Error(

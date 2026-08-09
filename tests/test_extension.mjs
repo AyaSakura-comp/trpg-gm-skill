@@ -27,6 +27,8 @@ function createFakePi() {
             value.story_progress = {
               chapter: "目前章節",
               objective: "推進目前場景目標",
+              opening_guidance_required: false,
+              opening_character_ids: [],
               stagnant_action_count: 0,
               intervention_required: false,
             };
@@ -116,6 +118,7 @@ const runProgress = async (pi, db = null, status = "advanced") => {
   const progressDb = db ?? pi.execCalls.find((call) => call.args.includes("context"))?.args[1] ?? "/tmp/game.db";
   pi.execResult = { code: 0, stdout: JSON.stringify({
     chapter: "目前章節", objective: "推進目前場景目標",
+    opening_guidance_required: false, opening_character_ids: [],
     stagnant_action_count: status === "stalled" ? 1 : 0,
     intervention_required: false,
   }), stderr: "", killed: false };
@@ -200,6 +203,7 @@ test("finalizer requires progress assessment and forced intervention after three
     participation: { characters: [{ character_id: "alice", can_act: true, action_count: 2 }] },
     story_progress: {
       chapter: "第一章", objective: "找到地下室入口",
+      opening_guidance_required: false, opening_character_ids: [],
       stagnant_action_count: 2, intervention_required: false,
     },
   }), stderr: "", killed: false };
@@ -220,6 +224,7 @@ test("finalizer requires progress assessment and forced intervention after three
 
   pi.execResult = { code: 0, stdout: JSON.stringify({
     chapter: "第一章", objective: "找到地下室入口",
+    opening_guidance_required: false, opening_character_ids: [],
     stagnant_action_count: 3, intervention_required: true,
   }), stderr: "", killed: false };
   await pi.tools.get("trpg_gm_story_progress").execute("progress", {
@@ -236,6 +241,7 @@ test("finalizer requires progress assessment and forced intervention after three
 
   pi.execResult = { code: 0, stdout: JSON.stringify({
     chapter: "第一章", objective: "找到地下室入口",
+    opening_guidance_required: false, opening_character_ids: [],
     stagnant_action_count: 0, intervention_required: false,
   }), stderr: "", killed: false };
   await pi.tools.get("trpg_gm_story_intervene").execute("intervene", {
@@ -262,6 +268,7 @@ test("progress recorded before the current action cannot assess that new action"
     participation: { characters: [{ character_id: "alice", can_act: true, action_count: 1 }] },
     story_progress: {
       chapter: "第一章", objective: "找到入口",
+      opening_guidance_required: false, opening_character_ids: [],
       stagnant_action_count: 0, intervention_required: false,
     },
   }), stderr: "", killed: false };
@@ -315,6 +322,7 @@ test("story progress tools reject malformed successful CLI output", async () => 
     participation: { characters: [] },
     story_progress: {
       chapter: "第一章", objective: "找到入口",
+      opening_guidance_required: false, opening_character_ids: [],
       stagnant_action_count: 0, intervention_required: false,
     },
   }), stderr: "", killed: false };
@@ -1062,6 +1070,15 @@ test("character generation reports rolled skill values and resource maxima", asy
     killed: false,
   };
   await runCli(pi, ["creation", "roll", "room-a", "pc2"]);
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    chapter: "第一章", objective: "調查大學檔案室的失蹤紀錄",
+    opening_guidance_required: false, opening_character_ids: [],
+    stagnant_action_count: 0, intervention_required: false,
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_story_objective").execute("opening", {
+    db: pi.execCalls[0].args[1], room: "room-a", chapter: "第一章",
+    objective: "調查大學檔案室的失蹤紀錄", reason: "結合記者與大學助教背景引導開場",
+  });
   await pi.tools.get("trpg_turn_finalize").execute("creation-roll", {
     turnKind: "gameplay",
     roomId: "room-a",
@@ -1082,6 +1099,56 @@ test("character generation reports rolled skill values and resource maxima", asy
   assert.match(text, /聆聽.*roll 1.*20/);
   assert.match(text, /HP.*roll 1.*9/);
   assert.match(text, /SAN.*roll 1.*46/);
+});
+
+test("character generation requires story-background guidance before finalization", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 開新團", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      id: "pc", name: "艾莉絲", stats: { "偵查": 50 },
+      generation: {
+        skill_rolls: { "偵查": 50 }, resource_rolls: { hp: 1, mp: 1, san: 1 },
+        maxima: { hp: 9, mp: 7, san: 46 },
+      },
+    }),
+    stderr: "", killed: false,
+  };
+  await runCli(pi, ["creation", "roll", "room-a", "pc"]);
+  const finalizer = pi.tools.get("trpg_turn_finalize");
+  const params = {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "not_applicable",
+    noPlayerActionReason: "創角完成，尚未進入角色行動",
+    stateChanges: ["生成角色並準備故事開場"],
+    secretsChecked: true, playerAgencyChecked: true,
+  };
+
+  await assert.rejects(() => finalizer.execute("before-opening", params), /story background|故事背景/i);
+
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({
+      chapter: "第一章", objective: "從匿名信追查失蹤案",
+      opening_guidance_required: false, opening_character_ids: [],
+      stagnant_action_count: 0, intervention_required: false,
+    }),
+    stderr: "", killed: false,
+  };
+  await pi.tools.get("trpg_gm_story_objective").execute("opening", {
+    db: pi.execCalls[0].args[1], room: "room-a", chapter: "第一章",
+    objective: "從匿名信追查失蹤案", reason: "依地方報社記者背景引導開場",
+    openingCharacterIds: ["pc"],
+  });
+  assert.deepEqual(pi.execCalls.at(-1).args.slice(2), ["context", "room-a"]);
+  const result = await finalizer.execute("after-opening", params);
+  assert.match(result.content[0].text, /validated/i);
 });
 
 test("action adjudication must preserve the player's exact wording", async () => {

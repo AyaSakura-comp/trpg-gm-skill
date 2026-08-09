@@ -32,7 +32,7 @@ trpg_gm_check             {db, room, character, stat, roll?}
 trpg_gm_entity_upsert     {db, room, kind, id, name, state}
 trpg_gm_character_adjust  {db, room, character, resource, delta, reason}
 trpg_gm_character_availability {db, room, character, canAct, reason}
-trpg_gm_story_objective   {db, room, chapter, objective, reason}
+trpg_gm_story_objective   {db, room, chapter, objective, reason, openingCharacterIds?}
 trpg_gm_story_progress    {db, room, status, reason} # advanced|stalled
 trpg_gm_story_intervene   {db, room, event, intendedProgress, reason}
 trpg_gm_canon_set         {db, room, key, value, source}
@@ -77,12 +77,13 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 3. **處理劇本**：讀取 `room.script_path`。有路徑但檔案不存在時停止遊戲並請玩家修正。沒有路徑時，先提醒可提供劇本；若玩家要直接開始，就即興建立 premise、主要衝突與初始場景，並以 `canon`/`entity` 儲存。
 4. **一致性檢查**：以劇本、canon、角色卡、entities、recent_events、`context.guardrails` 與規則為準。資訊不足時只補最小必要細節並立刻保存；不可悄悄改寫既有事實。持久化 guardrail 不可覆寫或忽略。
 5. **公平聚光燈**：讀取 `context.participation`。GM 必須讓每個目前可行動的玩家獲得平等的參與與決策機會；邀請下一位玩家行動時，優先選擇 `next_spotlight_character_ids` 中累積行動較少者，不可因某位玩家積極就長期只讓該角色推進劇情。被邀請不等於 GM 代替該玩家行動，玩家可以放棄機會。只有 HP 已降至 0，或已用 `character availability --can-act false` 保存昏迷、束縛、離場等確定狀態的角色，才可暫時排除；狀態解除後必須立即恢復 `canAct=true`。
-6. **劇情推進時鐘**：讀取 `context.story_progress` 的目前章節、目標與 `stagnant_action_count`。每個被接受、可實際改變局面的玩家 action 裁定後，都必須用 `story progress --status advanced|stalled` 誠實記錄是否真正推進章節或目標；換地點、重複搜索或只有氣氛變化不算自動推進。連續第三次 `stalled` 時，GM 必須立即用 `story intervene` 保存一個具體的世界事件及其 `intended_progress`，再敘述該事件；不得改目標、繼續接受第四個 action 或虛報 advanced 來清零。介入事件可以是時間壓力、NPC 帶來線索、敵對方主動行動、環境改變或入口開啟，但不得替玩家角色做決定，也不得保證檢定成功。
-7. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
-8. **判定**：只有已接受的行動，而且結果不確定、失敗有意義時才擲骰。先說明技能、目標值與風險，再執行 `check`；不可事後竄改骰子。每次判定結果都必須向玩家回報角色、技能、roll、目標值與成功等級，不能只敘述後果，也不能把 `hard` 誤稱為「勉強成功」。標準對照為 `critical=大成功`、`extreme=極難成功`、`hard=困難成功`、`success=成功`、`failure=失敗`、`fumble=大失敗`。
-9. **套用後果**：先用 `character adjust`、`entity`、`canon` 寫入狀態，再敘述確定發生的結果。新增 NPC、線索、場景或支線也必須保存。
-10. **Pi 回合驗證**：若環境提供 `trpg_turn_finalize` 工具，所有 CLI 寫入完成後，在獨立的工具回合以 `turnKind=gameplay` 呼叫它；`playerActionStatus` 必須與已保存的行動裁定一致；沒有玩家行動時才可用 `not_applicable` 並填寫 `noPlayerActionReason`。列出已保存的玩家安全變化，確認未洩密且未替玩家決策。若有兩名以上角色可行動，必須把 `nextSpotlightCharacterId` 設成重新計算後 `next_spotlight_character_ids` 的其中一位，並在回覆結尾將下一個有意義的決策機會交給該玩家。若仍在詢問新／舊團、room-id 或缺少的角色設定，可改用 `turnKind=clarification` 並說明等待的玩家輸入；已裁定行動、擲骰或寫入狀態後不得使用此例外。驗證失敗時先補齊狀態，不能直接輸出敘事。其他 agent 沒有此工具時略過工具呼叫，但仍須自行完成同一份檢查。
-11. **回覆玩家**：保持遊戲內視角，清楚描述可感知資訊；若拒絕行動，明確列出行動、拒絕原因與設定依據；最後問「你要怎麼做？」而不是替玩家選行動。
+6. **創角後優先開場**：若 `context.story_progress.opening_guidance_required=true`，代表角色已生成但故事尚未銜接。先根據 `opening_character_ids` 對應角色已保存的背景與概念，用 `story objective --opening-character-ids '[...]'` 保存具體章節與開場目標，並在 reason 逐一引用每名角色的原始背景或概念；接著只描述角色可感知的時空、事件與誘因，將第一個行動選擇交還玩家。開場不得替玩家角色決定為何到場、說什麼、如何反應或是否接受任務。完成此前不得接受玩家 action。
+7. **劇情推進時鐘**：讀取 `context.story_progress` 的目前章節、目標與 `stagnant_action_count`。每個被接受、可實際改變局面的玩家 action 裁定後，都必須用 `story progress --status advanced|stalled` 誠實記錄是否真正推進章節或目標；換地點、重複搜索或只有氣氛變化不算自動推進。連續第三次 `stalled` 時，GM 必須立即用 `story intervene` 保存一個具體的世界事件及其 `intended_progress`，再敘述該事件；不得改目標、繼續接受第四個 action 或虛報 advanced 來清零。介入事件可以是時間壓力、NPC 帶來線索、敵對方主動行動、環境改變或入口開啟，但不得替玩家角色做決定，也不得保證檢定成功。
+8. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
+9. **判定**：只有已接受的行動，而且結果不確定、失敗有意義時才擲骰。先說明技能、目標值與風險，再執行 `check`；不可事後竄改骰子。每次判定結果都必須向玩家回報角色、技能、roll、目標值與成功等級，不能只敘述後果，也不能把 `hard` 誤稱為「勉強成功」。標準對照為 `critical=大成功`、`extreme=極難成功`、`hard=困難成功`、`success=成功`、`failure=失敗`、`fumble=大失敗`。
+10. **套用後果**：先用 `character adjust`、`entity`、`canon` 寫入狀態，再敘述確定發生的結果。新增 NPC、線索、場景或支線也必須保存。
+11. **Pi 回合驗證**：若環境提供 `trpg_turn_finalize` 工具，所有 CLI 寫入完成後，在獨立的工具回合以 `turnKind=gameplay` 呼叫它；`playerActionStatus` 必須與已保存的行動裁定一致；沒有玩家行動時才可用 `not_applicable` 並填寫 `noPlayerActionReason`。列出已保存的玩家安全變化，確認未洩密且未替玩家決策。若有兩名以上角色可行動，必須把 `nextSpotlightCharacterId` 設成重新計算後 `next_spotlight_character_ids` 的其中一位，並在回覆結尾將下一個有意義的決策機會交給該玩家。若仍在詢問新／舊團、room-id 或缺少的角色設定，可改用 `turnKind=clarification` 並說明等待的玩家輸入；已裁定行動、擲骰或寫入狀態後不得使用此例外。驗證失敗時先補齊狀態，不能直接輸出敘事。其他 agent 沒有此工具時略過工具呼叫，但仍須自行完成同一份檢查。
+12. **回覆玩家**：保持遊戲內視角，清楚描述可感知資訊；若拒絕行動，明確列出行動、拒絕原因與設定依據；最後問「你要怎麼做？」而不是替玩家選行動。
 
 ## 防止劇情原地打轉
 
@@ -124,6 +125,7 @@ Pi gameplay 中不得透過 bash、Python `sqlite3` 或其他通用工具讀寫 
 4. 只有接受的最新提案才能執行 `creation roll`。每個技能各擲 d100，再映射至設定的 `skill_min..skill_max`；HP、MP、SAN 上限分別依 `resources` 的 `base + d(die)` 產生。
 5. `max_party_difference` 限制新角色與同團既有角色的 HP／MP／SAN 上限差距。原始骰值超出公平區間時只調整最終上限，不重擲；必須向玩家顯示原始 roll 與調整後數值。現在 HP／MP／SAN 的目前值不得治療到各自上限以上。
 6. `context` 會保存並恢復捏角規則、所有接受／拒絕提案、外觀、背景、概念、技能與生成後角色。Pi Guard 會自動附加被拒絕提案的原因，以及成功捏角的技能骰值和 HP／MP／SAN 上限骰值。
+7. 最後一名本回合角色生成後，立即依所有新角色的已保存背景／概念設定 `story objective --opening-character-ids '[...]'`；ID 必須完整且精確對應 `context.story_progress.opening_character_ids`，reason 必須逐一引用其已保存背景或概念。先向玩家呈現故事時代、地點、眼前事件及與角色背景相連的鉤子，再詢問第一個行動；不可用開場敘述替角色決定動機、台詞、移動或反應。若尚未設定開場 objective，SQLite 會拒絕玩家 action，Pi finalizer 也會阻止回覆。
 
 建議預設規則（劇本另有規定時以劇本為準）：技能值範圍 20–80；HP `8+d6` 且隊伍最大差 2；MP `6+d6` 且最大差 2；SAN `45+d30` 且最大差 10。
 

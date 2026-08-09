@@ -103,10 +103,17 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 1. 在 `before_agent_start` 注入當回合檢查表。
 2. 優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
 3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；DB guardrail 命中時會把錯誤的 `accepted` 強制改成 `rejected`。被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
-4. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
-5. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
+4. 角色生成後，要求 GM 先根據已保存的角色背景／概念設定具體開場 chapter/objective，呈現玩家可感知的故事背景並交還第一個行動選擇；完成前拒絕玩家 action 與 finalization。
+5. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密與玩家自主權的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
+6. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
 
 Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Python CLI 寫入 SQLite。
+
+### 創角後優先引導故事開場
+
+完成 `creation roll` 後，`context.story_progress.opening_guidance_required` 會變成 true，並以 `opening_character_ids` 指出尚未銜接故事的角色。GM 必須先讀取這些角色已保存的背景與概念，使用 `trpg_gm_story_objective` 保存具體開場章節、目標及背景依據；`openingCharacterIds` 必須精確包含所有待銜接角色，reason 必須逐一引用各角色已保存的背景或概念原文，再向玩家描述可感知的時代、地點、眼前事件與故事鉤子。
+
+開場只建立世界局面，不替玩家角色決定動機、台詞、移動、情緒反應或是否接受任務；敘述後應直接詢問玩家第一步要做什麼。objective 尚未保存時，SQLite 核心會拒絕新 action，Pi finalizer 也會拒絕輸出，確保 GM 不會在創角完成後停在角色數值表或直接跳過故事背景。
 
 ### 多玩家公平參與
 
