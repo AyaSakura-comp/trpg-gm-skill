@@ -61,12 +61,14 @@ pi install "$REPO"
 pi list
 ```
 
-Local path package 不會被複製；Pi 直接使用這份 checkout。安裝後重新啟動 Pi，或在已開啟的 session 執行：
+Local path package 不會被複製；Pi 直接使用這份 checkout。首次安裝後，長期存活的 Pi process 需重新啟動，或在已開啟的 session 執行：
 
 ```text
 /reload
 /skill:trpg-gm
 ```
+
+若 Piweb／Piscord 每則訊息都會 spawn 新 Pi process，下一則訊息便會讀取目前 checkout，不需另外 deploy 或重啟 gateway service。完整差異與驗證方式見 [`docs/PI_AGENT_DEPLOYMENT.md`](docs/PI_AGENT_DEPLOYMENT.md)。
 
 #### 直接從 Git repository 全域安裝
 
@@ -262,13 +264,15 @@ cd "$REPO"
 npm test
 ```
 
-測試通過後，在 Pi 執行：
+測試通過後，長期存活的 Pi session 執行：
 
 ```text
 /reload
 ```
 
-`/reload` 會重新載入 package 的 Skill 與 Extension；symlink 不需要重建。
+`/reload` 會重新載入 package 的 Skill 與 Extension；symlink 不需要重建。若 Piweb／Piscord gateway 對每則訊息啟動新 Pi process，下一則訊息已會直接載入更新後的 checkout，不必重新執行 `pi install`、重新掛載、複製檔案或重啟 gateway。只有 `pi list` 不再解析至預期路徑、checkout 已移動，或 gateway 本身不健康時才需修復掛載或服務。
+
+詳細部署矩陣與 troubleshooting：[`docs/PI_AGENT_DEPLOYMENT.md`](docs/PI_AGENT_DEPLOYMENT.md)。
 
 #### Git URL 安裝
 
