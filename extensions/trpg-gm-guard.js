@@ -334,7 +334,7 @@ function checklist() {
     "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
     "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
     "13. Use context.participation to give equal spotlight opportunities to all eligible players. Prefer next_spotlight_character_ids when inviting the next action. Only exclude a character whose persisted availability or HP says they cannot act; record other temporary inability with trpg_gm_character_availability.",
-    "14. Read context.story_progress. After each accepted, countable player action, persist advanced or stalled with trpg_gm_story_progress. At three consecutive stalled actions, persist a concrete in-world event with trpg_gm_story_intervene before narrating or accepting another action; never replace the objective to evade this clock.",
+    "14. Read context.story_progress. After each accepted, countable player action, persist advanced or stalled with trpg_gm_story_progress. At three consecutive stalled actions, persist a concrete in-world event with trpg_gm_story_intervene before narrating or accepting another action; never replace the objective to evade this clock. A forced transition must happen directly through the world event, not by requiring the player to choose a prescribed option. After the scene changes, return an open-ended action prompt and confirm eventDrivenTransitionChecked=true.",
     "15. The GM is the storyteller: render gameplay in rich, novel-like detail. Establish spatial layout, concrete objects, sensory cues, atmosphere, NPC/world activity, and how the scene changes, while staying grounded in persisted player-visible facts. Never fill detail by deciding a player character's thoughts, feelings, speech, movement, or reaction. Confirm this with narrativeDetailChecked=true when finalizing gameplay narration.",
   ].join("\n");
 }
@@ -801,7 +801,7 @@ export default function trpgGmGuard(pi) {
   registerTypedTool({
     name: "trpg_gm_story_intervene",
     label: "TRPG Story Intervention",
-    description: "After three stalled player actions, persist a concrete in-world event that pushes play toward the chapter or objective.",
+    description: "After three stalled player actions, persist a concrete in-world event that directly changes the situation or scene without requiring the player to choose a prescribed option.",
     parameters: {
       type: "object", additionalProperties: false,
       required: ["db", "room", "event", "intendedProgress", "reason"],
@@ -898,6 +898,10 @@ export default function trpgGmGuard(pi) {
           type: "boolean",
           description: "For gameplay narration, confirm the response richly depicts player-visible space, objects, sensory atmosphere, NPC/world activity, and scene changes without inventing player-character reactions; use true for a clarification with no narration",
         },
+        eventDrivenTransitionChecked: {
+          type: "boolean",
+          description: "Required after trpg_gm_story_intervene: confirm any forced transition occurs directly through the persisted world event, does not require a prescribed player option, and returns an open-ended action prompt",
+        },
       },
     },
     async execute(_toolCallId, params) {
@@ -910,6 +914,9 @@ export default function trpgGmGuard(pi) {
       }
       if (!params.narrativeDetailChecked) {
         throw new Error("Confirm that gameplay narration is detailed and novel-like while remaining grounded and player-agency safe.");
+      }
+      if (turn.storyInterventionPersisted && !params.eventDrivenTransitionChecked) {
+        throw new Error("Confirm that the forced transition happens through the persisted world event without requiring the player to choose a prescribed option.");
       }
       if (params.turnKind === "clarification") {
         if (params.playerActionStatus !== "not_applicable") {

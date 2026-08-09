@@ -190,7 +190,43 @@ class GameStoreTests(unittest.TestCase):
                 basis="入口已由介入事件打開", reason="可前往下一場景",
             )
             self.assertEqual(accepted["decision"], "accepted")
-            self.assertEqual(store.list_events("room-a")[-2]["kind"], "story_intervention")
+            intervention_event = store.list_events("room-a")[-2]
+            self.assertEqual(intervention_event["kind"], "story_intervention")
+            self.assertEqual(intervention_event["payload"]["transition_mode"], "direct_world_event")
+            self.assertFalse(intervention_event["payload"]["requires_prescribed_player_choice"])
+
+    def test_story_intervention_rejects_prescribed_player_choice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            for index in range(3):
+                store.adjudicate_action(
+                    "room-a", "alice", f"重複搜索 {index}", decision="accepted",
+                    basis="場景允許", reason="一般搜索",
+                )
+                store.record_story_progress(
+                    "room-a", status="stalled", reason="沒有推進目前目標",
+                )
+
+            coercive_events = [
+                "玩家必須選擇跟隨船夫才能進入下一幕",
+                "Choose the ferryman option to continue the story",
+            ]
+            for event in coercive_events:
+                with self.subTest(event=event):
+                    with self.assertRaisesRegex(ValueError, "prescribed player choice"):
+                        store.intervene_story(
+                            "room-a", event=event,
+                            intended_progress="前往下一幕",
+                            reason="嘗試強制轉場",
+                        )
+            with self.assertRaisesRegex(ValueError, "prescribed player choice"):
+                store.intervene_story(
+                    "room-a", event="倉庫大門自行打開",
+                    intended_progress="玩家必須選擇登船才能進入下一幕",
+                    reason="把指定選項藏在 intended_progress",
+                )
 
     def test_advancing_the_objective_resets_stagnant_action_count(self):
         with tempfile.TemporaryDirectory() as directory:

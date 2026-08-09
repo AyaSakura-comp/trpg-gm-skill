@@ -231,6 +231,16 @@ test("skill requires persistent equal spotlight for every eligible player", asyn
   }
 });
 
+test("forced transitions use direct world events instead of prescribed player options", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  const protocol = await readFile(new URL("../.agents/skills/trpg-gm/references/GM_PROTOCOL.md", import.meta.url), "utf8");
+  const guidance = skill + protocol;
+  assert.match(guidance, /強制轉場|forced transition/i);
+  assert.match(guidance, /劇情事件.*直接|direct.*in-world event/is);
+  assert.match(guidance, /不得.*選擇.*特定.*選項|must not.*prescribed.*option/is);
+  assert.match(guidance, /開放.*行動|open-ended.*action/is);
+});
+
 test("finalizer requires progress assessment and forced intervention after three stalled actions", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
@@ -289,10 +299,27 @@ test("finalizer requires progress assessment and forced intervention after three
     intendedProgress: "引導玩家前往地下室",
     reason: "三次玩家行動未推進劇情",
   });
-  await pi.tools.get("trpg_turn_finalize").execute("finalize", {
+  const finalizer = pi.tools.get("trpg_turn_finalize");
+  assert.equal(finalizer.parameters.properties.eventDrivenTransitionChecked.type, "boolean");
+  const finalParams = {
     turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
     stateChanges: ["地下室暗門已由突發事件打開"],
     secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
+  };
+  await assert.rejects(
+    finalizer.execute("missing-event-transition-check", finalParams),
+    /event|option|事件|選項/i,
+  );
+  await assert.rejects(
+    finalizer.execute("false-event-transition-check", {
+      ...finalParams,
+      eventDrivenTransitionChecked: false,
+    }),
+    /event|option|事件|選項/i,
+  );
+  await finalizer.execute("finalize", {
+    ...finalParams,
+    eventDrivenTransitionChecked: true,
   });
 });
 

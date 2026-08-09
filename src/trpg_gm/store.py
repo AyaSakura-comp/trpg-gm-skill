@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
@@ -964,6 +965,19 @@ class GameStore:
             self._append_event(db, room_id, "story_progress_recorded", payload)
         return self.get_story_progress(room_id)
 
+    @staticmethod
+    def _requires_prescribed_player_choice(event: str) -> bool:
+        normalized = unicodedata.normalize("NFKC", event).casefold()
+        patterns = (
+            r"(?:玩家|角色).{0,12}(?:必須|只能|務必).{0,12}(?:選擇|接受|答應)",
+            r"(?:必須|只能|務必).{0,12}(?:選擇|接受|答應).{0,24}(?:才(?:能|可)|否則)",
+            r"(?:選擇|接受|答應).{0,24}才(?:能|可).{0,16}(?:進入|繼續|前往|轉場|推進)",
+            r"\b(?:player|character)\s+(?:must|has\s+to|can\s+only)\s+(?:choose|select|accept)\b",
+            r"\b(?:must|have\s+to)\s+(?:choose|select|accept)\b.{0,48}\b(?:continue|proceed|advance)\b",
+            r"\b(?:choose|select|accept)\b.{0,32}\boption\b.{0,32}\bto\s+(?:continue|proceed|advance)\b",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
     def intervene_story(
         self,
         room_id: str,
@@ -974,6 +988,10 @@ class GameStore:
     ) -> dict[str, Any]:
         if not event.strip() or not intended_progress.strip() or not reason.strip():
             raise ValueError("intervention event, intended_progress, and reason must not be empty")
+        if self._requires_prescribed_player_choice(f"{event}\n{intended_progress}"):
+            raise ValueError(
+                "story intervention must be a direct world event, not a prescribed player choice"
+            )
         progress = self.get_story_progress(room_id)
         if not progress["intervention_required"]:
             raise ValueError("story intervention is only allowed after three stalled actions")
@@ -981,6 +999,8 @@ class GameStore:
             "event": event.strip(),
             "intended_progress": intended_progress.strip(),
             "reason": reason.strip(),
+            "transition_mode": "direct_world_event",
+            "requires_prescribed_player_choice": False,
             "chapter": progress["chapter"],
             "objective": progress["objective"],
         }

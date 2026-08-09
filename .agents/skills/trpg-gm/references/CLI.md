@@ -160,7 +160,7 @@ $GM --db "$DB" story intervene my-room \
   --reason '連續三次玩家行動未推進目前目標'
 ```
 
-The intervention resets stagnation, but it must not choose a player-character action, silently rewrite canon, leak secrets, or guarantee success. It creates a new pressure, clue, opening, NPC move, or environmental change that gives players a meaningful route toward the next chapter or objective.
+The intervention resets stagnation, but it must not choose a player-character action, silently rewrite canon, leak secrets, or guarantee success. It creates a new pressure, clue, opening, NPC move, or environmental change that gives players a meaningful route toward the next chapter or objective. For a forced transition, `--event` must describe the world change that directly occurs; it must not demand that the player select a prescribed option before the next scene is allowed. Bring the NPC, danger, opening, or environmental change to the current scene unless player-declared movement or transit already establishes arrival. After persisting the event, narrate the changed situation and return an open-ended action prompt. The core checks both `--event` and `--intended-progress`, rejecting common Chinese/English constructions that explicitly require choosing or accepting an option before the story may continue. A passing event is audited with `transition_mode=direct_world_event` and `requires_prescribed_player_choice=false`; this is bounded text validation rather than a complete semantic classifier, so novel paraphrases remain subject to GM protocol and review. Pi finalization additionally requires `eventDrivenTransitionChecked=true` for that intervention turn.
 
 ## Player action adjudication
 

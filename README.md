@@ -133,7 +133,9 @@ HP 為 0 的角色會自動排除。其他確定的昏迷、束縛、石化或�
 
 `context.story_progress` 會保存目前章節、具體目標與連續未推進的玩家 action 數。每個 accepted action 裁定後，GM 必須保存 `advanced` 或 `stalled` 與理由；rejected action 不改變世界，因此不進入此時鐘。連續第三次 `stalled` 時，SQLite 核心會拒絕第四個 action，也禁止直接更換 objective 清零；Pi finalizer 同時要求先使用 `trpg_gm_story_intervene` 保存具體的世界事件與預期推進方向。
 
-介入事件應提供新壓力、可見線索、NPC 主動行為或環境改變，使玩家能朝下一章／目標前進；它不能代替玩家角色決策、保證成功、洩漏秘密或改寫 canon。成功介入後停滯計數歸零。
+介入事件應提供新壓力、可見線索、NPC 主動行為或環境改變，使玩家能朝下一章／目標前進。需要強制轉場時，事件本身必須直接改變場景：讓 NPC 或危險來到目前地點、讓外部環境改變、開啟通路，或在玩家已宣告搭乘／移動後直接寫到抵達；不得要求玩家先選 GM 指定的特定選項、接受唯一任務或從假選單中挑唯一有效答案，才允許進下一幕。
+
+事件發生並持久化後，GM 描述新的可見局面，再用開放式問題將行動權交還玩家。若玩家尚未宣告移動，GM 不得替角色走到下一個地點，而應把下一幕的壓力帶到角色目前所在處。SQLite 會拒絕中英文常見的「必須選擇／接受某選項才能繼續」介入文字，通過後保存 `transition_mode=direct_world_event` 與 `requires_prescribed_player_choice=false`；這是 bounded text validation，未列入模式的全新語意改寫仍須由 GM 規範及 review 防護。`trpg_turn_finalize` 會在有 `story_intervention` 的回合要求 `eventDrivenTransitionChecked=true`。介入不能代替玩家角色決策、保證成功、洩漏秘密或改寫 canon；成功介入後停滯計數歸零。
 
 ### 3. 安裝到 OpenAI Codex CLI／IDE
 
@@ -406,6 +408,7 @@ Extension 另提供 `trpg_turn_finalize` 工具。Agent 必須在所有狀態操
 - 執行判定後既未保存後果，也沒有合理的 `noStateChangeReason`，或判定之前沒有已接受的行動裁定。
 - 沒有確認 player-facing 回覆已排除 GM secret。
 - 沒有以 `narrativeDetailChecked=true` 確認 gameplay 回覆已準備小說式的空間、感官、世界活動與事件變化細節。
+- 保存 `story_intervention` 後，沒有以 `eventDrivenTransitionChecked=true` 確認強制轉場由劇情事件直接發生，而非逼玩家選擇指定選項。
 - 沒有確認玩家角色的額外決策仍交給玩家。
 
 `trpg_turn_finalize` 的 `turnKind` 通常使用 `gameplay`。若 Skill 正在詢問「新團或舊團」、room-id、劇本或角色等缺少資訊，可使用 `clarification`，並在 `noStateChangeReason` 說明正在等待哪一項玩家輸入；已經擲骰或寫入狀態的回合不能藉此跳過驗證。
@@ -943,7 +946,7 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 - Session 收尾保存 player-safe recap；舊團入口顯示 recap，而不是完整私密 context。
 - 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
 
-本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。使用 production Qwen MTP 與三名對抗玩家驗證禁止條款、元敘事攻擊及秘密保護的紀錄見 [`docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md)。
+本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事，以及 [`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場。
 
 ## 目前邊界
 
@@ -973,7 +976,11 @@ trpg-gm-skill/
 │   └── test_*.py
 ├── docs/
 │   ├── LUNA_PLAYTEST.md
-│   └── QWEN_MTP_GUARDRAIL_PLAYTEST.md
+│   ├── PI_AGENT_DEPLOYMENT.md
+│   ├── QWEN_EVENT_DRIVEN_TRANSITION_E2E.md
+│   ├── QWEN_MTP_GUARDRAIL_PLAYTEST.md
+│   ├── QWEN_NARRATIVE_DETAIL_E2E.md
+│   └── QWEN_OPENING_GUIDANCE_E2E.md
 ├── package.json
 ├── pyproject.toml
 └── README.md
