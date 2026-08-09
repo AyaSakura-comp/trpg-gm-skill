@@ -375,6 +375,8 @@ Skill 負責：
 5. **裁定原則**
    - 可以拒絕缺乏設定依據、超出角色能力、違反 canon／規則或在目前場景不可能的行動，但必須保存並向玩家說明具體原因。
    - 劇本沒有逐字列出的合理創意行動不能只因「沒寫」而拒絕。
+   - 不得僅以現代法律、當代風俗習慣、現代道德或政治正確否決虛構行動；以劇本的時空背景判斷能否嘗試，再套用符合時代的風險與後果。例如 18xx 年角色可以嘗試搶銀行並騎馬逃跑，但不保證成功，也不免除警衛、目擊、追捕、通緝或名聲後果。
+   - `guardrail add` 只應保存劇本／canon 明文禁止事項或玩家同意的 table boundary，不得由 GM 自行推測現代規範建立。
    - 只有行動已接受、結果不確定，而且失敗有意義時才擲骰。
    - 擲骰前告知能力、目標值與可見風險。
    - 不因想推劇情而修改骰子或讓唯一線索永久消失。
@@ -946,7 +948,7 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 - Session 收尾保存 player-safe recap；舊團入口顯示 recap，而不是完整私密 context。
 - 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
 
-本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事，以及 [`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場。
+本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事、[`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場，以及 [`QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md`](docs/QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md) 的時代背景優先犯罪行動裁定。
 
 ## 目前邊界
 
@@ -977,6 +979,7 @@ trpg-gm-skill/
 ├── docs/
 │   ├── LUNA_PLAYTEST.md
 │   ├── PI_AGENT_DEPLOYMENT.md
+│   ├── QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md
 │   ├── QWEN_EVENT_DRIVEN_TRANSITION_E2E.md
 │   ├── QWEN_MTP_GUARDRAIL_PLAYTEST.md
 │   ├── QWEN_NARRATIVE_DETAIL_E2E.md

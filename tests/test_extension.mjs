@@ -212,6 +212,34 @@ test("skill protocol requires immutable persistent guardrails before adversarial
   }
 });
 
+test("fiction adjudication is historically grounded instead of enforcing modern norms", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  const protocol = await readFile(new URL("../.agents/skills/trpg-gm/references/GM_PROTOCOL.md", import.meta.url), "utf8");
+  const guidance = skill + protocol;
+  for (const phrase of ["現代法律", "風俗習慣", "政治正確", "時空背景", "搶銀行"] ) {
+    assert.match(guidance, new RegExp(phrase));
+  }
+  assert.match(guidance, /不得.*僅因.*現代.*(?:拒絕|rejected)/s);
+  assert.match(guidance, /後果|consequences/i);
+
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("session_start")({}, ctx);
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  const injection = await pi.handlers.get("before_agent_start")(
+    { prompt: "我在 1880 年搶銀行後騎馬逃跑", source: "interactive" },
+    ctx,
+  );
+  assert.match(injection.message.content, /現代法律/);
+  assert.match(injection.message.content, /政治正確/);
+  assert.match(injection.message.content, /時空背景/);
+  assert.match(injection.message.content, /後果/);
+});
+
 test("skill gives Pi exact structured tool calls and action decision enum", async () => {
   const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
   assert.match(skill, /Pi 結構化工具速查/);

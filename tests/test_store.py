@@ -825,6 +825,41 @@ class GameStoreTests(unittest.TestCase):
                     basis="劇本未建立穿牆能力", reason="",
                 )
 
+    def test_crime_has_no_default_morality_filter_but_explicit_table_boundary_applies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+
+            allowed = store.adjudicate_action(
+                "room-a", "alice", "我在 1880 年搶銀行後騎馬逃跑",
+                decision="accepted",
+                basis="1880 年城鎮、銀行與馬匹均已建立，行動在場景中可嘗試",
+                reason="違法性將形成警衛與追捕後果，不是阻止玩家宣告的理由",
+            )
+            self.assertEqual(allowed["decision"], "accepted")
+            store.record_story_progress(
+                "room-a", status="advanced", reason="搶劫嘗試直接改變目前局面",
+            )
+
+            store.add_guardrail(
+                "room-a", "no-bank-robbery-at-this-table",
+                scopes=["action"],
+                statement="玩家已同意本桌不描寫銀行搶劫",
+                forbidden_terms=["搶銀行"],
+                source="table-boundary:session-zero",
+            )
+            blocked = store.adjudicate_action(
+                "room-a", "alice", "我再次搶銀行",
+                decision="accepted",
+                basis="場景仍可到達銀行",
+                reason="嘗試再次搶劫",
+            )
+            self.assertEqual(blocked["decision"], "rejected")
+            self.assertEqual(
+                blocked["enforced_guardrails"], ["no-bank-robbery-at-this-table"],
+            )
+
     def test_record_check_uses_character_stat_and_logs_result(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.sqlite3")

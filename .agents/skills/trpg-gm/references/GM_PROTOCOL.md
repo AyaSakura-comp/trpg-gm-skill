@@ -66,6 +66,10 @@ A forced transition must be delivered by a direct in-world event, never by requi
 
 Before resolving a declared player action, compare it against the scenario, canon, character capabilities, current scene, established entities/events, and rules. Persist the ruling with `action adjudicate`, including a concrete basis and reason. An action may be rejected when it lacks established support, exceeds the character's capabilities, contradicts canon/rules, or is impossible in the current scene. Explain every rejection to the player and do not roll or mutate world state for it. Absence from a scenario's explicit list is not by itself a reason to reject an otherwise plausible creative action.
 
+Adjudicate fictional conduct from its own era, region, culture, and established world rather than imposing modern law, contemporary customs, morality, or political correctness as universal action gates. Do not reject an action solely because modern norms would call it illegal, improper, offensive, or criminal. If it is possible in the setting, accept the attempt and resolve uncertainty normally. For example, an 18xx character may attempt to rob a bank and escape on horseback; guards, witnesses, weapons, pursuit, reputation, local law, and other setting-grounded consequences still apply. Acceptance authorizes an attempt, never automatic success or immunity from consequences.
+
+Scenario guardrails must come from an explicit scenario/canon prohibition or a player-agreed table boundary, not from the GM inventing a modern-norm restriction. This content-neutral rule does not override physical impossibility, character limitations, system rules, persisted canon, player agency, secret protection, or an explicit table boundary.
+
 Call for a roll only after the action is accepted and when all are true:
 
 - the action is possible;
