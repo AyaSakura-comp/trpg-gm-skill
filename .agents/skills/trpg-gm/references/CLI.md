@@ -115,6 +115,20 @@ $GM --db "$DB" character adjust my-room alice mp -2 --reason '施放守護術'
 
 Resource names are exactly `hp`, `mp`, and `san`. Delta may be positive or negative. Always provide an in-world reason.
 
+### Availability and equal spotlight
+
+Persist temporary inability to act instead of relying on chat memory:
+
+```bash
+$GM --db "$DB" character availability my-room alice \
+  --can-act false --reason '昏迷，尚未接受急救'
+
+$GM --db "$DB" character availability my-room alice \
+  --can-act true --reason '急救後恢復意識'
+```
+
+`--can-act` is exactly `true` or `false`, and every change requires an auditable reason. HP at 0 also makes a character automatically ineligible. `context.participation` reports action counts, eligibility, and `next_spotlight_character_ids`: the currently eligible characters with the fewest adjudicated actions. GM must prefer those characters at the next natural decision point so every player receives equal meaningful opportunities. A persisted unavailable character is temporarily excluded; an attempted action while unavailable is mechanically forced to `rejected` until availability is restored.
+
 ## Player action adjudication
 
 Every declared in-world player action must be adjudicated before a check or world-state mutation:
@@ -133,7 +147,7 @@ $GM --db "$DB" action adjudicate my-room alice '展開翅膀飛過鎖門' \
   --reason '艾莉絲是普通人，目前也沒有任何可用的飛行手段'
 ```
 
-The command validates the room character, requires non-empty `basis` and `reason`, and persists an `action_adjudicated` event. `decision` is exactly `accepted` or `rejected`. A rejected action must be explained to the player and must not trigger a check or world-state mutation. Do not reject a plausible creative action merely because the script does not enumerate it word-for-word; reject actions that lack established support, exceed character capabilities, contradict canon/rules, or are impossible in the current scene.
+The command validates the room character, requires non-empty `basis` and `reason`, and persists an `action_adjudicated` event. Every adjudicated attempt contributes to persistent participation accounting regardless of acceptance, because a rejected but possible attempt still represents a player's opportunity to engage. An attempt mechanically rejected because the character is currently unable to act does not count. `decision` is exactly `accepted` or `rejected`. A rejected action must be explained to the player and must not trigger a check or world-state mutation. Do not reject a plausible creative action merely because the script does not enumerate it word-for-word; reject actions that lack established support, exceed character capabilities, contradict canon/rules, or are impossible in the current scene.
 
 ## Checks
 

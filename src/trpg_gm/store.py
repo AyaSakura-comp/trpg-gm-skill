@@ -66,6 +66,16 @@ class GameStore:
                     kind TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS character_availability (
+                    room_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL,
+                    can_act INTEGER NOT NULL CHECK (can_act IN (0, 1)),
+                    reason TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (room_id, character_id),
+                    FOREIGN KEY (room_id, character_id)
+                        REFERENCES characters(room_id, id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS canon (
                     room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
                     key TEXT NOT NULL,
@@ -203,6 +213,121 @@ class GameStore:
         character = dict(row)
         character["stats"] = json.loads(character.pop("stats_json"))
         return character
+
+    def set_character_availability(
+        self,
+        room_id: str,
+        character_id: str,
+        *,
+        can_act: bool,
+        reason: str,
+    ) -> dict[str, Any]:
+        if not isinstance(can_act, bool):
+            raise ValueError("can_act must be a boolean")
+        if not reason.strip():
+            raise ValueError("availability reason must not be empty")
+        if self.get_character(room_id, character_id) is None:
+            raise KeyError(f"unknown character: {room_id}/{character_id}")
+        result = {
+            "character_id": character_id,
+            "can_act": can_act,
+            "reason": reason.strip(),
+        }
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO character_availability
+                (room_id, character_id, can_act, reason, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(room_id, character_id) DO UPDATE SET
+                    can_act=excluded.can_act,
+                    reason=excluded.reason,
+                    updated_at=excluded.updated_at""",
+                (
+                    room_id,
+                    character_id,
+                    int(can_act),
+                    result["reason"],
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._append_event(db, room_id, "character_availability_changed", result)
+        participant = next(
+            item for item in self._get_participation(room_id)["characters"]
+            if item["character_id"] == character_id
+        )
+        return {
+            **result,
+            "effective_can_act": participant["can_act"],
+            "unavailable_reason": participant["unavailable_reason"],
+        }
+
+    def _get_participation(
+        self,
+        room_id: str,
+        events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT c.id, c.name, c.hp, a.can_act, a.reason
+                FROM characters AS c
+                LEFT JOIN character_availability AS a
+                  ON a.room_id = c.room_id AND a.character_id = c.id
+                WHERE c.room_id = ? ORDER BY c.id""",
+                (room_id,),
+            ).fetchall()
+        action_counts = {row["id"]: 0 for row in rows}
+        accepted_counts = {row["id"]: 0 for row in rows}
+        last_action_event_ids: dict[str, int | None] = {row["id"]: None for row in rows}
+        for event in events if events is not None else self.list_events(room_id):
+            if (
+                event["kind"] != "action_adjudicated"
+                or event["payload"].get("availability_enforced")
+                or event["payload"].get("enforced_guardrails")
+            ):
+                continue
+            character_id = event["payload"].get("character_id")
+            if character_id not in action_counts:
+                continue
+            action_counts[character_id] += 1
+            accepted_counts[character_id] += event["payload"].get("decision") == "accepted"
+            last_action_event_ids[character_id] = event["id"]
+
+        characters = []
+        for row in rows:
+            hp_depleted = row["hp"] <= 0
+            explicitly_unavailable = row["can_act"] == 0
+            can_act = not hp_depleted and not explicitly_unavailable
+            unavailable_reason = None
+            if hp_depleted:
+                unavailable_reason = "HP 已降至 0，角色目前無法行動"
+            elif explicitly_unavailable:
+                unavailable_reason = row["reason"]
+            characters.append(
+                {
+                    "character_id": row["id"],
+                    "name": row["name"],
+                    "can_act": can_act,
+                    "unavailable_reason": unavailable_reason,
+                    "action_count": action_counts[row["id"]],
+                    "accepted_action_count": accepted_counts[row["id"]],
+                    "last_action_event_id": last_action_event_ids[row["id"]],
+                }
+            )
+        eligible = [item for item in characters if item["can_act"]]
+        minimum = min((item["action_count"] for item in eligible), default=None)
+        return {
+            "characters": characters,
+            "eligible_character_ids": [item["character_id"] for item in eligible],
+            "next_spotlight_character_ids": [
+                item["character_id"]
+                for item in eligible
+                if item["action_count"] == minimum
+            ],
+            "action_count_gap": (
+                max(item["action_count"] for item in eligible) - minimum
+                if minimum is not None else 0
+            ),
+        }
 
     def adjust_resource(
         self, room_id: str, character_id: str, resource: str, delta: int, reason: str
@@ -730,10 +855,26 @@ class GameStore:
             raise ValueError("reason must explain why the action is accepted or rejected")
         if self.get_character(room_id, character_id) is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
+        requested_decision = decision
+        participation = self._get_participation(room_id)
+        participant = next(
+            item for item in participation["characters"]
+            if item["character_id"] == character_id
+        )
+        availability_enforcement: dict[str, Any] = {}
+        if not participant["can_act"]:
+            decision = "rejected"
+            basis = "角色目前狀態不允許行動"
+            reason = participant["unavailable_reason"]
+            availability_enforcement = {
+                "requested_decision": requested_decision,
+                "availability_enforced": True,
+            }
         matches = self._matching_guardrails(room_id, "action", action)
-        decision, basis, reason, enforcement = self._enforce_guardrails(
+        decision, basis, reason, guardrail_enforcement = self._enforce_guardrails(
             decision, basis, reason, matches
         )
+        enforcement = {**availability_enforcement, **guardrail_enforcement}
         result = {
             "character_id": character_id,
             "action": action.strip(),
@@ -752,6 +893,15 @@ class GameStore:
         character = self.get_character(room_id, character_id)
         if character is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
+        participant = next(
+            item for item in self._get_participation(room_id)["characters"]
+            if item["character_id"] == character_id
+        )
+        if not participant["can_act"]:
+            raise ValueError(
+                f"character cannot resolve a check while unavailable: "
+                f"{participant['unavailable_reason']}"
+            )
         if stat not in character["stats"]:
             raise KeyError(f"unknown stat for {character_id}: {stat}")
         target = character["stats"][stat]
@@ -857,17 +1007,19 @@ class GameStore:
             }
             for row in draft_rows
         ]
+        events = self.list_events(room_id)
         return {
             "room": room,
             "characters": characters,
             "character_creation": creation,
+            "participation": self._get_participation(room_id, events),
             "guardrails": self.list_guardrails(room_id),
             "canon": {row["key"]: row["value"] for row in canon_rows},
             "entities": [
                 {"kind": row["kind"], "id": row["id"], "name": row["name"], "state": json.loads(row["state_json"])}
                 for row in entity_rows
             ],
-            "recent_events": self.list_events(room_id)[-event_limit:],
+            "recent_events": events[-event_limit:],
         }
 
     def list_events(self, room_id: str) -> list[dict[str, Any]]:

@@ -119,6 +119,30 @@ class CliTests(unittest.TestCase):
                 main(["--db", db, "guardrail", "list", "demo"])
             self.assertEqual(json.loads(output.getvalue())[0]["id"], "no-magic")
 
+    def test_character_availability_cli_updates_participation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "game.db")
+            with redirect_stdout(StringIO()):
+                main(["--db", db, "room", "create", "demo", "--system", "coc7"])
+                main([
+                    "--db", db, "character", "add", "demo", "alice", "艾莉絲",
+                    "--hp", "10", "--mp", "8", "--san", "55",
+                ])
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main([
+                    "--db", db, "character", "availability", "demo", "alice",
+                    "--can-act", "false", "--reason", "受到束縛",
+                ]), 0)
+            self.assertFalse(json.loads(output.getvalue())["can_act"])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                main(["--db", db, "context", "demo"])
+            participant = json.loads(output.getvalue())["participation"]["characters"][0]
+            self.assertFalse(participant["can_act"])
+            self.assertEqual(participant["unavailable_reason"], "受到束縛")
+
     def test_action_adjudicate_emits_persisted_ruling(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "game.sqlite3")

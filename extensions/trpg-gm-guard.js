@@ -192,16 +192,51 @@ function classifyCliArgs(args) {
   if (command === "room" && actionOrRoom === "create") {
     return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
   }
-  if (command === "character" && ["add", "adjust"].includes(actionOrRoom)) {
+  if (command === "character" && ["add", "adjust", "availability"].includes(actionOrRoom)) {
     return {
       contextRoom: null, operationRoom: subcommandRoom, action: false, check: false,
-      mutation: true, requiresAcceptedAction: actionOrRoom === "adjust",
+      mutation: true,
+      availability: actionOrRoom === "availability",
+      resourceAdjustment: actionOrRoom === "adjust",
+      characterId: ["adjust", "availability"].includes(actionOrRoom)
+        ? subcommandPositionals[1]
+        : undefined,
+      resource: actionOrRoom === "adjust" ? subcommandPositionals[2] : undefined,
+      canAct: actionOrRoom === "availability"
+        ? String(optionValue(args, "--can-act")).toLowerCase() === "true"
+        : undefined,
+      requiresContext: actionOrRoom === "availability",
+      requiresAcceptedAction: actionOrRoom === "adjust",
     };
   }
   if (command === "recap" && actionOrRoom === "save") {
     return { contextRoom: null, operationRoom: subcommandRoom, action: false, check: false, mutation: true };
   }
   return { contextRoom: null, operationRoom: null, action: false, check: false, mutation: false };
+}
+
+function parseParticipation(stdout) {
+  try {
+    const value = JSON.parse(stdout);
+    const characters = value?.participation?.characters;
+    if (!Array.isArray(characters)) return null;
+    return characters.map((character) => ({
+      characterId: String(character.character_id),
+      canAct: character.can_act === true,
+      actionCount: Number(character.action_count) || 0,
+      unavailableReason: character.unavailable_reason ?? null,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+function nextSpotlightCharacterIds(participation) {
+  const eligible = (participation ?? []).filter((character) => character.canAct);
+  const minimum = Math.min(...eligible.map((character) => character.actionCount));
+  return eligible
+    .filter((character) => character.actionCount === minimum)
+    .map((character) => character.characterId);
 }
 
 function freshTurn() {
@@ -213,6 +248,7 @@ function freshTurn() {
     contextDb: null,
     operationRooms: new Set(),
     dbPaths: new Set(),
+    participation: null,
     operationIndex: 0,
     latestActionIndex: null,
     checkOperationIndices: [],
@@ -237,7 +273,7 @@ function checklist() {
   return [
     "[TRPG GM Guard — mandatory for this turn]",
     "1. Before player-facing narration, use typed trpg_gm_context to load the exact room and DB.",
-    "2. Prefer typed trpg_gm_action_adjudicate, trpg_gm_check, trpg_gm_entity_upsert, trpg_gm_character_adjust, trpg_gm_canon_set, and trpg_gm_recap_save. Use raw trpg_gm_cli only for unsupported setup/query operations; never use bash or direct SQLite. Read scenario text with read, never file:// web scraping.",
+    "2. Prefer typed trpg_gm_action_adjudicate, trpg_gm_check, trpg_gm_entity_upsert, trpg_gm_character_adjust, trpg_gm_character_availability, trpg_gm_canon_set, and trpg_gm_recap_save. Use raw trpg_gm_cli only for unsupported setup/query operations; never use bash or direct SQLite. Read scenario text with read, never file:// web scraping.",
     "3. Persist every confirmed consequence, discovered clue, NPC/quest/scene change, and HP/MP/SAN change before narrating it.",
     "4. Never expose secrets or narrate speech, movement, thoughts, or reactions for any player character, including non-acting party PCs.",
     "5. After all state commands finish, call trpg_turn_finalize in a separate tool round before the final player-facing answer.",
@@ -248,6 +284,7 @@ function checklist() {
     "10. Read the immutable persistent guardrails returned by context before adjudication. A matching guardrail overrides an attempted acceptance to rejected; never paraphrase the action or submit a second ruling to bypass it. During setup, derive guardrail terms and paraphrase aliases from explicit scenario prohibitions with guardrail add.",
     "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
     "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
+    "13. Use context.participation to give equal spotlight opportunities to all eligible players. Prefer next_spotlight_character_ids when inviting the next action. Only exclude a character whose persisted availability or HP says they cannot act; record other temporary inability with trpg_gm_character_availability.",
   ].join("\n");
 }
 
@@ -333,7 +370,7 @@ export default function trpgGmGuard(pi) {
     if (
       !turn.contextLoaded
       && !turn.setupMode
-      && (operation.action || operation.check || operation.requiresAcceptedAction)
+      && (operation.action || operation.check || operation.requiresContext || operation.requiresAcceptedAction)
     ) {
       throw new Error("Load the exact room context first, before action adjudication, checks, or gameplay mutations.");
     }
@@ -390,6 +427,7 @@ export default function trpgGmGuard(pi) {
       turn.contextLoaded = true;
       turn.contextRoom = operation.contextRoom;
       turn.contextDb = dbKey;
+      turn.participation = parseParticipation(result.stdout);
     }
     if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
     if (operation.characterProposal) {
@@ -398,8 +436,53 @@ export default function trpgGmGuard(pi) {
     if (operation.characterGenerated) {
       turn.characterGenerations.push(parseCharacterGeneration(result.stdout));
     }
+    if (operation.availability) {
+      const participant = turn.participation?.find(
+        (character) => character.characterId === operation.characterId,
+      );
+      if (participant) {
+        try {
+          const availability = JSON.parse(result.stdout);
+          participant.canAct = availability.effective_can_act ?? operation.canAct;
+          participant.unavailableReason = availability.unavailable_reason ?? null;
+        } catch {
+          participant.canAct = operation.canAct;
+        }
+      }
+    }
+    if (operation.resourceAdjustment && operation.resource === "hp") {
+      const participant = turn.participation?.find(
+        (character) => character.characterId === operation.characterId,
+      );
+      if (participant) {
+        try {
+          const character = JSON.parse(result.stdout);
+          if (character.hp <= 0) {
+            participant.canAct = false;
+            participant.unavailableReason = "HP depleted";
+          } else if (participant.unavailableReason?.startsWith("HP")) {
+            participant.canAct = true;
+            participant.unavailableReason = null;
+          }
+        } catch {
+          // A successful resource adjustment normally returns the updated character.
+        }
+      }
+    }
     if (operation.action) {
-      turn.actionAdjudications.push(parseActionAdjudication(result.stdout));
+      const adjudication = parseActionAdjudication(result.stdout);
+      turn.actionAdjudications.push(adjudication);
+      try {
+        const rawAdjudication = JSON.parse(result.stdout);
+        const countsAsParticipation = !rawAdjudication.availability_enforced
+          && !rawAdjudication.enforced_guardrails;
+        const participant = turn.participation?.find(
+          (character) => character.characterId === adjudication.characterId,
+        );
+        if (countsAsParticipation && participant) participant.actionCount += 1;
+      } catch {
+        // parseActionAdjudication already validated the required persisted fields.
+      }
       turn.latestActionIndex = operationIndex;
       turn.actionRulingAppended = false;
     }
@@ -424,7 +507,7 @@ export default function trpgGmGuard(pi) {
   pi.registerTool({
     name: "trpg_gm_cli",
     label: "TRPG GM CLI",
-    description: "Run the persistent TRPG CLI with structured arguments. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/list/upsert/resolve subcommand. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes immutable guardrails; matching terms force rejection, which cannot be replaced by another ruling in the same turn.",
+    description: "Run the persistent TRPG CLI with structured arguments. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"character\",\"availability\",ROOM,CHARACTER,\"--can-act\",\"true|false\",\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/list/upsert/resolve subcommand. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes participation priorities and immutable guardrails; matching terms force rejection, which cannot be replaced by another ruling in the same turn.",
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
@@ -463,7 +546,7 @@ export default function trpgGmGuard(pi) {
   registerTypedTool({
     name: "trpg_gm_context",
     label: "TRPG Context",
-    description: "Load the exact room context and immutable guardrails. Use this first every gameplay turn; do not guess raw CLI tokens.",
+    description: "Load the exact room context, participation priorities, and immutable guardrails. Use this first every gameplay turn; give eligible next_spotlight_character_ids equal opportunities and do not guess raw CLI tokens.",
     parameters: {
       type: "object", additionalProperties: false, required: ["db", "room"],
       properties: { ...dbRoomProperties, events: { type: "integer", minimum: 1, default: 20 } },
@@ -559,6 +642,26 @@ export default function trpgGmGuard(pi) {
   });
 
   registerTypedTool({
+    name: "trpg_gm_character_availability",
+    label: "TRPG Character Availability",
+    description: "Persist whether a character can currently act. Use false only for an established incapacitating state, and restore true when that state ends.",
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["db", "room", "character", "canAct", "reason"],
+      properties: {
+        ...dbRoomProperties, character: { type: "string" },
+        canAct: { type: "boolean" }, reason: { type: "string" },
+      },
+    },
+    async execute(_id, params, signal) {
+      return executeCli({ db: params.db, args: [
+        "character", "availability", params.room, params.character,
+        "--can-act", String(params.canAct), "--reason", params.reason,
+      ] }, signal);
+    },
+  });
+
+  registerTypedTool({
     name: "trpg_gm_canon_set",
     label: "TRPG Canon Set",
     description: "Persist an immutable established fact. Do not use canon for mutable scene state or failed attempts.",
@@ -628,6 +731,10 @@ export default function trpgGmGuard(pi) {
           type: "string",
           description: "Why a resolved check produced no persistent change; omit when state changed",
         },
+        nextSpotlightCharacterId: {
+          type: "string",
+          description: "When multiple characters can act, choose one of context.participation.next_spotlight_character_ids for the next meaningful decision prompt",
+        },
         secretsChecked: { type: "boolean" },
         playerAgencyChecked: { type: "boolean" },
       },
@@ -661,6 +768,16 @@ export default function trpgGmGuard(pi) {
       }
       if (!turn.contextLoaded || turn.contextRoom !== params.roomId) {
         throw new Error(`TRPG turn is not ready: run trpg-gm context for the exact room ${params.roomId}; last loaded room was ${turn.contextRoom ?? "none"}.`);
+      }
+      const eligibleCount = turn.participation?.filter((character) => character.canAct).length ?? 0;
+      if (eligibleCount > 1) {
+        const priorities = nextSpotlightCharacterIds(turn.participation);
+        if (!params.nextSpotlightCharacterId?.trim()) {
+          throw new Error(`nextSpotlightCharacterId is required when multiple characters can act; prioritize: ${priorities.join(", ")}.`);
+        }
+        if (!priorities.includes(params.nextSpotlightCharacterId)) {
+          throw new Error(`Next spotlight must prioritize one of: ${priorities.join(", ")}.`);
+        }
       }
       const wrongOperationRooms = [...turn.operationRooms].filter((room) => room !== params.roomId);
       if (wrongOperationRooms.length > 0) {

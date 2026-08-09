@@ -16,6 +16,15 @@ def _json(value: str) -> dict:
     return parsed
 
 
+def _boolean(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise argparse.ArgumentTypeError("must be true or false")
+
+
 def _json_list(value: str) -> list[str]:
     parsed = json.loads(value)
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
@@ -53,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     adjust.add_argument("resource", choices=("hp", "mp", "san"))
     adjust.add_argument("delta", type=int)
     adjust.add_argument("--reason", required=True)
+    availability = character_commands.add_parser("availability")
+    availability.add_argument("room_id")
+    availability.add_argument("character_id")
+    availability.add_argument("--can-act", type=_boolean, required=True)
+    availability.add_argument("--reason", required=True)
 
     canon = commands.add_parser("canon")
     canon.add_argument("room_id")
@@ -153,6 +167,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "character" and args.action == "adjust":
         result = store.adjust_resource(
             args.room_id, args.character_id, args.resource, args.delta, args.reason
+        )
+    elif args.command == "character" and args.action == "availability":
+        result = store.set_character_availability(
+            args.room_id,
+            args.character_id,
+            can_act=args.can_act,
+            reason=args.reason,
         )
     elif args.command == "canon":
         store.set_canon(args.room_id, args.key, args.value, source=args.source)

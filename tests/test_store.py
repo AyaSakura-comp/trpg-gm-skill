@@ -48,6 +48,112 @@ class GameStoreTests(unittest.TestCase):
             self.assertEqual(events[-1]["kind"], "resource_changed")
             self.assertEqual(events[-1]["payload"]["reason"], "目擊怪物")
 
+    def test_participation_prioritizes_eligible_players_with_fewer_turns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            for character_id, name in (("alice", "艾莉絲"), ("bob", "鮑伯"), ("carol", "卡蘿")):
+                store.add_character("room-a", character_id, name, hp=10, mp=8, san=55)
+            for action in ("我檢查窗戶", "我搜索書桌"):
+                store.adjudicate_action(
+                    "room-a", "alice", action, decision="accepted",
+                    basis="目前場景允許調查", reason="一般調查行動可行",
+                )
+            store.adjudicate_action(
+                "room-a", "bob", "我聆聽門後", decision="accepted",
+                basis="目前場景允許調查", reason="一般調查行動可行",
+            )
+            store.set_character_availability(
+                "room-a", "carol", can_act=False, reason="遭束縛，尚未脫困"
+            )
+
+            participation = store.get_context("room-a")["participation"]
+
+            self.assertEqual(participation["next_spotlight_character_ids"], ["bob"])
+            self.assertEqual(participation["eligible_character_ids"], ["alice", "bob"])
+            by_id = {item["character_id"]: item for item in participation["characters"]}
+            self.assertEqual(by_id["alice"]["action_count"], 2)
+            self.assertEqual(by_id["bob"]["action_count"], 1)
+            self.assertFalse(by_id["carol"]["can_act"])
+            self.assertEqual(by_id["carol"]["unavailable_reason"], "遭束縛，尚未脫困")
+
+    def test_unavailable_character_action_is_forced_rejected_until_reenabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.set_character_availability(
+                "room-a", "alice", can_act=False, reason="昏迷"
+            )
+
+            rejected = store.adjudicate_action(
+                "room-a", "alice", "我站起來搜索房間", decision="accepted",
+                basis="玩家要求行動", reason="嘗試執行",
+            )
+
+            self.assertEqual(rejected["decision"], "rejected")
+            self.assertEqual(rejected["requested_decision"], "accepted")
+            self.assertIn("昏迷", rejected["reason"])
+            store.set_character_availability("room-a", "alice", can_act=True, reason="甦醒")
+            accepted = store.adjudicate_action(
+                "room-a", "alice", "我慢慢坐起來", decision="accepted",
+                basis="角色已甦醒", reason="目前狀態允許",
+            )
+            self.assertEqual(accepted["decision"], "accepted")
+            participant = store.get_context("room-a")["participation"]["characters"][0]
+            self.assertEqual(participant["action_count"], 1)
+
+    def test_guardrail_rejection_does_not_consume_spotlight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.add_guardrail(
+                "room-a", "no-flight", scopes=["action"],
+                statement="普通人不能飛行", forbidden_terms=["飛行"], source="scenario#limits",
+            )
+
+            store.adjudicate_action(
+                "room-a", "alice", "我直接飛行到屋頂", decision="accepted",
+                basis="玩家要求", reason="嘗試行動",
+            )
+
+            participant = store.get_context("room-a")["participation"]["characters"][0]
+            self.assertEqual(participant["action_count"], 0)
+
+    def test_unavailable_character_cannot_resolve_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=8, san=55,
+                stats={"偵查": 60},
+            )
+            store.set_character_availability("room-a", "alice", can_act=False, reason="昏迷")
+
+            with self.assertRaisesRegex(ValueError, "cannot resolve a check.*昏迷"):
+                store.record_check("room-a", "alice", "偵查", roll=20)
+
+            self.assertFalse(any(
+                event["kind"] == "check_resolved" for event in store.list_events("room-a")
+            ))
+
+    def test_zero_hp_character_is_ineligible_for_spotlight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=0, mp=8, san=55)
+
+            availability = store.set_character_availability(
+                "room-a", "alice", can_act=True, reason="意識清醒但仍重傷"
+            )
+            participation = store.get_context("room-a")["participation"]
+
+            self.assertFalse(availability["effective_can_act"])
+            self.assertEqual(participation["eligible_character_ids"], [])
+            self.assertFalse(participation["characters"][0]["can_act"])
+            self.assertIn("HP", participation["characters"][0]["unavailable_reason"])
+
     def test_canon_rejects_silent_rewrites_and_context_collects_room_state(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.sqlite3")

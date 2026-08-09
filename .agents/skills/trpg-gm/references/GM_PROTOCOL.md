@@ -36,6 +36,14 @@ Ask the player for name, appearance, background, concept, and skills. Offer reco
 
 Show all raw rolls and generated values. Skill d100 rolls map into the configured ability range. HP/MP/SAN maxima use their configured dice and are bounded by `max_party_difference` against every existing party member; never secretly reroll a weak or strong result. Preserve appearance, background, concept, drafts, rolls, final skills, and maxima in SQLite for later sessions.
 
+## Equal player participation
+
+Every player must receive equal access to meaningful choices, dialogue, investigation, and action. At each scene transition or natural decision point, inspect `context.participation` and prefer characters listed in `next_spotlight_character_ids`; they are the eligible characters with the fewest recorded action attempts. Do not repeatedly center the most assertive player, and do not treat quietness, low skill, or failed checks as permission to skip someone. Offering spotlight never authorizes the GM to choose or narrate that player's action.
+
+Equal opportunity is not forced identical behavior. A player may decline, and urgent fiction may briefly require a direct response, but the GM should return the next meaningful decision to an underrepresented eligible player. Accepted actions and plausible player attempts that receive an ordinary GM rejection count as participation. Mechanical rejections caused by immutable guardrails or a persisted inability to act do not consume spotlight.
+
+Only exclude a character whose current persisted state prevents action. HP at zero is automatically ineligible; use `character availability --can-act false --reason ...` for established conditions such as unconsciousness, restraint, petrification, or absence, and restore `true` as soon as the condition ends. Never invent incapacity to manipulate the participation order.
+
 ## Fair adjudication
 
 Before resolving a declared player action, compare it against the scenario, canon, character capabilities, current scene, established entities/events, and rules. Persist the ruling with `action adjudicate`, including a concrete basis and reason. An action may be rejected when it lacks established support, exceeds the character's capabilities, contradicts canon/rules, or is impossible in the current scene. Explain every rejection to the player and do not roll or mutate world state for it. Absence from a scenario's explicit list is not by itself a reason to reject an otherwise plausible creative action.

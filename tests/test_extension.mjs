@@ -69,6 +69,7 @@ const runAction = async (pi, {
   decision = "accepted",
   basis = "目前場景允許角色接近並調查這扇門",
   reason = "角色具備執行此行動所需的一般能力",
+  db,
 } = {}) => {
   const original = pi.execResult;
   pi.execResult = {
@@ -87,7 +88,7 @@ const runAction = async (pi, {
     return await runCli(pi, [
       "action", "adjudicate", roomId, characterId, action,
       "--decision", decision, "--basis", basis, "--reason", reason,
-    ]);
+    ], db);
   } finally {
     pi.execResult = original;
   }
@@ -147,6 +148,13 @@ test("skill gives Pi exact structured tool calls and action decision enum", asyn
   }
 });
 
+test("skill requires persistent equal spotlight for every eligible player", async () => {
+  const skill = await readFile(new URL("../.agents/skills/trpg-gm/SKILL.md", import.meta.url), "utf8");
+  for (const phrase of ["context.participation", "next_spotlight_character_ids", "平等", "無法行動"] ) {
+    assert.match(skill, new RegExp(phrase));
+  }
+});
+
 test("structured CLI tool description teaches action enum and exact player text", () => {
   const pi = createFakePi();
   trpgGuard(pi);
@@ -162,7 +170,7 @@ test("dedicated gameplay tools expose typed parameters instead of raw CLI tokens
   for (const name of [
     "trpg_gm_context", "trpg_gm_action_adjudicate", "trpg_gm_check",
     "trpg_gm_entity_upsert", "trpg_gm_character_adjust", "trpg_gm_canon_set",
-    "trpg_gm_recap_save",
+    "trpg_gm_recap_save", "trpg_gm_character_availability",
   ]) {
     assert.ok(pi.tools.has(name), `${name} must be registered`);
   }
@@ -174,6 +182,119 @@ test("dedicated gameplay tools expose typed parameters instead of raw CLI tokens
     pi.tools.get("trpg_gm_entity_upsert").parameters.properties.state.type,
     "object",
   );
+  assert.equal(
+    pi.tools.get("trpg_gm_character_availability").parameters.properties.canAct.type,
+    "boolean",
+  );
+});
+
+test("character availability typed tool persists inability to act", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我衝過去但被落石壓住", source: "interactive" },
+    ctx,
+  );
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await runAction(pi, { action: "我衝過去但被落石壓住", db: "/tmp/game.db" });
+  pi.execResult = { code: 0, stdout: '{"character_id":"pc","can_act":false,"reason":"被落石壓住"}', stderr: "", killed: false };
+
+  await pi.tools.get("trpg_gm_character_availability").execute("availability", {
+    db: "/tmp/game.db", room: "room-a", character: "pc",
+    canAct: false, reason: "被落石壓住",
+  });
+
+  assert.deepEqual(pi.execCalls.at(-1).args.slice(2), [
+    "character", "availability", "room-a", "pc",
+    "--can-act", "false", "--reason", "被落石壓住",
+  ]);
+});
+
+test("character availability can be restored after context without another action", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "角色在自然恢復階段甦醒", source: "interactive" },
+    ctx,
+  );
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  pi.execResult = { code: 0, stdout: '{"character_id":"pc","can_act":true,"reason":"甦醒"}', stderr: "", killed: false };
+
+  await pi.tools.get("trpg_gm_character_availability").execute("availability", {
+    db: "/tmp/game.db", room: "room-a", character: "pc",
+    canAct: true, reason: "甦醒",
+  });
+
+  assert.equal(pi.execCalls.length, 2);
+});
+
+test("availability changes refresh finalizer spotlight eligibility", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "鮑伯在場景轉換時陷入昏迷", source: "interactive" },
+    ctx,
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: {
+      characters: [
+        { character_id: "alice", can_act: true, action_count: 2 },
+        { character_id: "bob", can_act: true, action_count: 0 },
+      ],
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  pi.execResult = { code: 0, stdout: '{"character_id":"bob","can_act":false,"reason":"昏迷"}', stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_character_availability").execute("availability", {
+    db: "/tmp/game.db", room: "room-a", character: "bob",
+    canAct: false, reason: "昏迷",
+  });
+
+  await pi.tools.get("trpg_turn_finalize").execute("finalize", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "not_applicable",
+    noPlayerActionReason: "場景狀態更新，沒有玩家角色行動",
+    stateChanges: ["鮑伯目前昏迷，無法行動"],
+    secretsChecked: true, playerAgencyChecked: true,
+  });
+});
+
+test("HP depletion refreshes finalizer spotlight eligibility", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我擋在鮑伯前方承受衝擊", source: "interactive" },
+    ctx,
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: { characters: [
+      { character_id: "alice", can_act: true, action_count: 1, unavailable_reason: null },
+      { character_id: "bob", can_act: true, action_count: 0, unavailable_reason: null },
+    ] },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await runAction(pi, { characterId: "alice", action: "我擋在鮑伯前方承受衝擊", db: "/tmp/game.db" });
+  pi.execResult = { code: 0, stdout: '{"id":"bob","hp":0}', stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_character_adjust").execute("adjust", {
+    db: "/tmp/game.db", room: "room-a", character: "bob",
+    resource: "hp", delta: -10, reason: "受到衝擊",
+  });
+
+  await pi.tools.get("trpg_turn_finalize").execute("finalize", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+    stateChanges: ["鮑伯 HP 降至 0"], secretsChecked: true, playerAgencyChecked: true,
+  });
 });
 
 test("dedicated gameplay tools build exact CLI calls and share turn tracking", async () => {
@@ -482,6 +603,43 @@ test("finalizer rejects a turn without context or persisted state accounting", a
     }),
     /state change|noStateChangeReason/i,
   );
+});
+
+test("finalizer requires the least-participating eligible player as next spotlight", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "我檢查門縫", source: "interactive" },
+    ctx,
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: {
+      characters: [
+        { character_id: "alice", can_act: true, action_count: 2 },
+        { character_id: "bob", can_act: true, action_count: 0 },
+      ],
+      eligible_character_ids: ["alice", "bob"],
+      next_spotlight_character_ids: ["bob"],
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await runAction(pi, { characterId: "alice", action: "我檢查門縫", db: "/tmp/game.db" });
+  const finalize = pi.tools.get("trpg_turn_finalize");
+  const base = {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "accepted",
+    stateChanges: [], noStateChangeReason: "行動不需擲骰且沒有改變既有狀態",
+    secretsChecked: true, playerAgencyChecked: true,
+  };
+
+  await assert.rejects(() => finalize.execute("finalize", base), /nextSpotlightCharacterId/);
+  await assert.rejects(
+    () => finalize.execute("finalize", { ...base, nextSpotlightCharacterId: "alice" }),
+    /must prioritize.*bob/i,
+  );
+  await finalize.execute("finalize", { ...base, nextSpotlightCharacterId: "bob" });
 });
 
 test("successful finalization prevents follow-up reminders", async () => {
