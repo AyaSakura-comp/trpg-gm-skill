@@ -2,12 +2,148 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import sqlite3
+import sys
+import uuid
 from pathlib import Path
 from typing import Sequence
 
-from .catalog import list_active_rooms
+from .catalog import list_active_rooms, room_ids_in_file
 from .store import GameStore
+
+
+ROOMS_DIR_ENV = "TRPG_GM_ROOMS_DIR"
+ROOM_FILE_SUFFIX = "." + "sqlite" + str(3)
+
+
+def _canonical_rooms_directory() -> Path:
+    configured = os.environ.get(ROOMS_DIR_ENV)
+    directory = Path(configured).expanduser() if configured else Path.home() / ".trpg" / "rooms"
+    return directory.resolve()
+
+
+def _canonical_room_path(room_id: str) -> Path:
+    if (
+        not room_id
+        or room_id in {".", ".."}
+        or "/" in room_id
+        or "\\" in room_id
+        or "\x00" in room_id
+    ):
+        raise ValueError("room_id must be a safe room id without path separators")
+    candidate = _canonical_rooms_directory() / f"{room_id}{ROOM_FILE_SUFFIX}"
+    if candidate.is_symlink():
+        raise ValueError("canonical room path must not be a symlink")
+    return candidate
+
+
+def _atomic_relocate_room(source: Path, target: Path) -> None:
+    alias = source.with_name(f".{source.name}.relocate-{uuid.uuid4().hex}")
+    alias.symlink_to(target)
+    try:
+        os.link(source, target)
+        try:
+            os.replace(alias, source)
+        except OSError:
+            target.unlink()
+            raise
+    finally:
+        if alias.is_symlink():
+            alias.unlink()
+
+
+def _atomic_restore_room(source: Path, target: Path) -> None:
+    restored = source.with_name(f".{source.name}.restore-{uuid.uuid4().hex}")
+    os.link(target, restored)
+    try:
+        os.replace(restored, source)
+        target.unlink()
+    finally:
+        if restored.exists():
+            restored.unlink()
+
+
+def _relocate_active_rooms(search_root: Path) -> dict:
+    resolved_root = search_root.expanduser().resolve()
+    include_root = resolved_root.name == "rooms" and resolved_root.parent.name == ".trpg"
+    catalog = list_active_rooms(
+        resolved_root,
+        include_root=include_root,
+        include_legacy_default=True,
+    )
+    sources: dict[Path, list[str]] = {}
+    for room in catalog["rooms"]:
+        sources.setdefault(Path(room["db"]), []).append(str(room["room_id"]))
+
+    planned: list[tuple[str, Path, Path]] = []
+    planned_ids: set[str] = set()
+    for source, room_ids in sources.items():
+        if len(room_ids) != 1:
+            raise ValueError(f"cannot relocate a room file containing multiple active rooms: {source}")
+        room_id = room_ids[0]
+        all_room_ids = room_ids_in_file(source)
+        if all_room_ids != [room_id]:
+            raise ValueError(
+                f"cannot relocate a room file containing multiple rooms: {source}"
+            )
+        if room_id in planned_ids:
+            raise ValueError(f"duplicate room id found in legacy locations: {room_id}")
+        planned_ids.add(room_id)
+        target = _canonical_room_path(room_id)
+        if source == target:
+            continue
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"canonical room already exists: {room_id}")
+        sidecars = [Path(f"{source}{suffix}") for suffix in ("-wal", "-shm", "-journal")]
+        if any(sidecar.exists() for sidecar in sidecars):
+            raise ValueError(f"cannot relocate an open room with sidecar files: {room_id}")
+        planned.append((room_id, source, target))
+
+    locks: list[sqlite3.Connection] = []
+    try:
+        for room_id, source, _target in planned:
+            connection = sqlite3.connect(source, timeout=0, isolation_level=None)
+            journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            if journal_mode == "wal":
+                connection.close()
+                raise ValueError(f"cannot relocate WAL-mode room: {room_id}")
+            connection.execute("BEGIN EXCLUSIVE")
+            locks.append(connection)
+    except (sqlite3.Error, ValueError) as error:
+        for connection in locks:
+            connection.close()
+        raise ValueError(f"all rooms must be quiescent before relocation: {error}") from error
+
+    relocated: list[dict[str, str]] = []
+    completed: list[tuple[Path, Path]] = []
+    try:
+        for room_id, source, target in planned:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_relocate_room(source, target)
+            completed.append((source, target))
+            relocated.append(
+                {"room_id": room_id, "from": str(source), "to": str(target), "legacy_alias": str(source)}
+            )
+    except OSError:
+        for source, target in reversed(completed):
+            if target.exists():
+                _atomic_restore_room(source, target)
+        for connection in locks:
+            connection.rollback()
+            connection.close()
+        raise
+    else:
+        for connection in locks:
+            connection.commit()
+            connection.close()
+
+    return {
+        "source_root": catalog["root"],
+        "canonical_root": str(_canonical_rooms_directory()),
+        "relocated": relocated,
+    }
 
 
 def _json(value: str) -> dict:
@@ -41,7 +177,9 @@ def build_parser() -> argparse.ArgumentParser:
     rooms = commands.add_parser("rooms")
     rooms_commands = rooms.add_subparsers(dest="action", required=True)
     rooms_list = rooms_commands.add_parser("list")
-    rooms_list.add_argument("root", type=Path)
+    rooms_list.add_argument("root", type=Path, nargs="?")
+    rooms_relocate = rooms_commands.add_parser("relocate")
+    rooms_relocate.add_argument("root", type=Path)
 
     room = commands.add_parser("room")
     room_commands = room.add_subparsers(dest="action", required=True)
@@ -176,12 +314,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    argument_list = list(argv) if argv is not None else sys.argv[1:]
+    args = build_parser().parse_args(argument_list)
     if args.command == "rooms" and args.action == "list":
-        result = list_active_rooms(args.root)
+        root = args.root or _canonical_rooms_directory()
+        if args.root is None and not root.exists():
+            result = {"root": str(root), "active_only": True, "rooms": []}
+        else:
+            result = list_active_rooms(root, include_root=args.root is None)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "rooms" and args.action == "relocate":
+        result = _relocate_active_rooms(args.root)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
+    explicit_path = any(
+        token == "--db" or token.startswith("--db=") for token in argument_list
+    )
+    if not explicit_path:
+        args.db = _canonical_room_path(args.room_id)
     store = GameStore(args.db)
 
     if args.command == "room":

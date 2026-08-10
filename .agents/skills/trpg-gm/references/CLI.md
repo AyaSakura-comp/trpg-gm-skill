@@ -7,22 +7,32 @@ GM=./scripts/trpg-gm
 DB=/path/to/workspace/.trpg/rooms/my-room.sqlite3
 ```
 
+By default, omit the explicit database option: every agent resolves a room id beneath one canonical user-level directory. Set `TRPG_GM_ROOMS_DIR` to configure that shared directory deployment-wide. Explicit paths remain supported for legacy data and tests.
+
 ## Active room catalog, room creation, and context
 
-List every active TRPG game stored beneath standard `.trpg/rooms/` directories in a workspace tree:
+List every active game in the canonical directory:
 
 ```bash
-$GM rooms list /absolute/workspace/root
+$GM rooms list
 ```
 
-The result contains only player-safe catalog metadata: search root, room id, rules system, active status, character count, latest event/recap timestamp, and canonical DB path. It recursively discovers `.trpg/rooms/` directories, ignores unrelated or malformed files, filters `rooms.status = 'active'`, opens databases read-only without migrations, and never returns script paths, canon, entities, or secrets. In Pi, prefer typed `trpg_gm_rooms_list` with `root`; this out-of-game query is the only operation that does not require selecting and loading one exact room first.
+To search legacy workspace trees only, append an absolute root. To relocate active legacy rooms into the canonical directory while leaving compatibility aliases at their prior paths, run:
+
+```bash
+$GM rooms relocate /absolute/legacy/search/root
+```
+
+Relocation preflights every room before moving anything, includes the pre-v0.15 legacy default location, rejects duplicate IDs, existing canonical targets, multi-room files, WAL/sidecar files, and rooms for which it cannot acquire an exclusive maintenance lock, and never overwrites canonical state. The result contains the source, destination, and compatibility alias for each relocated room.
+
+Catalog output contains only player-safe metadata: search root, room id, rules system, active status, character count, latest event/recap timestamp, and canonical path. It ignores unrelated or malformed files, filters `rooms.status = 'active'`, opens room files read-only without migrations, and never returns script paths, canon, entities, or secrets. In Pi, prefer typed `trpg_gm_rooms_list` and omit `root` normally; this out-of-game query is the only operation that does not require selecting and loading one exact room first.
 
 Create or load one exact room normally:
 
 ```bash
-$GM --db "$DB" room create my-room --system coc7 --script /abs/path/scenario.md --seed 42
-$GM --db "$DB" context my-room --events 30
-$GM --db "$DB" events my-room
+$GM room create my-room --system coc7 --script /abs/path/scenario.md --seed 42
+$GM context my-room --events 30
+$GM events my-room
 ```
 
 Use an absolute scenario path when possible. A room cannot be silently recreated under the same id. `context` always returns the room's persistent `guardrails`.

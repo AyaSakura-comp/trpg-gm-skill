@@ -17,7 +17,7 @@ cd <directory-containing-this-SKILL.md>
 ./scripts/trpg-gm --db <ROOM_DB> <command...>
 ```
 
-預設建議每個遊戲 room 使用獨立資料庫：`<workspace>/.trpg/rooms/<room-id>.sqlite3`。`room-id` 必須取自目前 Discord channel/thread、web room 或使用者明確指定的名稱；不確定時先問，絕不能猜到別的 room。
+所有 agent 的預設共用位置是使用者層級的 canonical room directory；只有 legacy 明確覆寫時，才讓每個遊戲 room 使用 workspace 內的獨立資料庫：`<workspace>/.trpg/rooms/<room-id>.sqlite3`。可用 `TRPG_GM_ROOMS_DIR` 統一覆寫 canonical directory。`room-id` 必須取自目前 Discord channel/thread、web room 或使用者明確指定的名稱，且不可含路徑分隔符；不確定時先問，絕不能猜到別的 room。
 
 完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。Pi 環境若提供 typed tools，列出 active 遊戲時使用 `trpg_gm_rooms_list`；gameplay 必須優先使用 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set` 與 `trpg_gm_recap_save`；它們直接接收命名欄位與 JSON object，可避免漏掉 subcommand、room、name 或產生壞 JSON。只有 typed tools 尚未涵蓋的 setup／查詢操作才使用 `trpg_gm_cli`。所有 Pi TRPG 狀態操作都不得使用 bash wrapper。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
 
@@ -26,7 +26,7 @@ cd <directory-containing-this-SKILL.md>
 Typed tools 的正確用法：
 
 ```text
-trpg_gm_rooms_list        {root} # player-safe active-game catalog; no room context required
+trpg_gm_rooms_list        {root?} # omit root for canonical room directory; root is legacy search only
 trpg_gm_context           {db, room, events?}
 trpg_gm_action_adjudicate {db, room, character, action, decision, basis, reason}
 trpg_gm_check             {db, room, character, stat, roll?}
@@ -64,7 +64,7 @@ recap：  ["recap","save",ROOM,"--summary",SUMMARY,"--state",STATE_JSON]
 > 要開一個新團，還是繼續舊團並先看 recap？
 
 - **開新團**：進入下方「開團流程」，確認 room-id、規則、劇本與角色。
-- **繼續舊團**：確認 room-id 與 DB。若使用標準路徑，可列出 `.trpg/rooms/*.sqlite3` 的檔名讓玩家選擇，但不能自行挑選。選定後先執行 `context` 驗證 room，再執行 `recap show`。
+- **繼續舊團**：從 canonical catalog 確認 room-id；只有尋找 legacy workspace 時才列出 `.trpg/rooms/*.sqlite3` 的 legacy 檔名讓玩家選擇，但不能自行挑選。選定後先執行 `context` 驗證 room，再執行 `recap show`。
 - 有 recap 時，只向玩家顯示 recap 的 summary 與 player-safe state；不要把完整 context、secret 或 GM notes 當成 recap 輸出。
 - 沒有 recap 時，從 context 產生最小的玩家安全摘要，立即用 `recap save` 保存，再顯示給玩家。
 - 如果使用者已明確說「開新團」或「繼續 room-x」，不要重複詢問已知資訊。
@@ -124,7 +124,7 @@ TRPG 行動是虛構世界中的宣告。不得把現代法律、當代風俗習
 
 ## 列出目前遊戲
 
-當使用者詢問「有哪些 TRPG room／目前正在玩的遊戲」時，使用 typed `trpg_gm_rooms_list`，把要搜尋的 workspace root 傳入 `root`。這是 player-safe、read-only 的全域 catalog 查詢，不是 gameplay action，也不需要先猜一個 room 或載入 `trpg_gm_context`。結果只列出標準 `.trpg/rooms/` 目錄下 `status=active` 的遊戲及 room id、規則系統、角色數、最近活動時間與 DB 路徑；不得為了列清單改用 bash、`find` 或直接查 SQLite。若使用者沒有指定 root，使用 agent 目前 workspace root；只有 workspace 本身不明確時才詢問。
+當使用者詢問「有哪些 TRPG room／目前正在玩的遊戲／房間在哪裡」時，使用 typed `trpg_gm_rooms_list` 並省略 `root`，直接查詢 canonical room directory。這是 player-safe、read-only 的全域 catalog 查詢，不是 gameplay action，也不需要先猜一個 room 或載入 `trpg_gm_context`。結果只列出 `status=active` 的遊戲及 room id、規則系統、角色數、最近活動時間與 canonical path；不得為了列清單改用 bash、`find` 或直接查 SQLite。只有尋找尚未遷移的 legacy workspace rooms 時才明確傳入 `root`。經使用者確認後，可用 raw setup command `rooms relocate ROOT` 將 active legacy rooms 原子移至 canonical directory，並在舊位置留下相容 alias；它也會搜尋 pre-v0.15 legacy default，並拒絕重複 room id、既有 canonical target、多 room 檔案、WAL／sidecar 或無法取得 exclusive maintenance lock 的 room，絕不覆寫現有 canonical 狀態。
 
 ## 開團流程
 

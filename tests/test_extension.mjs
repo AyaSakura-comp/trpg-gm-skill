@@ -89,7 +89,7 @@ test("typed room catalog tool lists active games beneath a search root without g
   trpgGuard(pi);
   const tool = pi.tools.get("trpg_gm_rooms_list");
   assert.ok(tool);
-  assert.deepEqual(tool.parameters.required, ["root"]);
+  assert.deepEqual(tool.parameters.required, []);
   pi.execResult = {
     code: 0,
     stdout: JSON.stringify({ root: "/games", active_only: true, rooms: [] }),
@@ -128,6 +128,37 @@ test("typed room catalog tool lists active games beneath a search root without g
   );
   await assert.rejects(
     () => gameplayPi.tools.get("trpg_gm_rooms_list").execute("catalog-bypass", { root: "/games" }),
+    /only be used for an explicit room-list request/,
+  );
+});
+
+test("typed room catalog uses the canonical location for a room-location request", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 這個房間在哪裡", source: "interactive" },
+    ctx,
+  );
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({ root: "/home/player/.trpg/rooms", active_only: true, rooms: [] }),
+    stderr: "",
+    killed: false,
+  };
+
+  await pi.tools.get("trpg_gm_rooms_list").execute("catalog-default", {});
+
+  assert.deepEqual(pi.execCalls[0].args, ["rooms", "list"]);
+
+  const mixedPi = createFakePi();
+  trpgGuard(mixedPi);
+  await mixedPi.handlers.get("input")(
+    { text: "/skill:trpg-gm 我走進房間並問出口在哪裡", source: "interactive" },
+    context(),
+  );
+  await assert.rejects(
+    () => mixedPi.tools.get("trpg_gm_rooms_list").execute("mixed-bypass", {}),
     /only be used for an explicit room-list request/,
   );
 });

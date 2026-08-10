@@ -15,11 +15,17 @@ _REQUIRED_SCHEMA = {
 }
 
 
-def _candidate_room_databases(root: Path) -> list[Path]:
+def _candidate_room_databases(
+    root: Path, *, include_root: bool = False, include_legacy_default: bool = False
+) -> list[Path]:
     candidates: set[Path] = set()
-    for rooms_directory in root.rglob("rooms"):
-        if not rooms_directory.is_dir() or rooms_directory.parent.name != ".trpg":
-            continue
+    directories = [root] if include_root else []
+    directories.extend(
+        directory
+        for directory in root.rglob("rooms")
+        if directory.is_dir() and directory.parent.name == ".trpg"
+    )
+    for rooms_directory in directories:
         try:
             resolved_directory = rooms_directory.resolve(strict=True)
             resolved_directory.relative_to(root)
@@ -28,6 +34,18 @@ def _candidate_room_databases(root: Path) -> list[Path]:
             continue
         for candidate in entries:
             if candidate.name.endswith(("-journal", "-shm", "-wal")):
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if resolved.is_file():
+                candidates.add(resolved)
+    if include_legacy_default:
+        legacy_name = "game." + "sqlite" + str(3)
+        for candidate in root.rglob(legacy_name):
+            if candidate.parent.name != ".trpg":
                 continue
             try:
                 resolved = candidate.resolve(strict=True)
@@ -60,6 +78,18 @@ def _has_trpg_schema(connection: sqlite3.Connection) -> bool:
     return True
 
 
+def room_ids_in_file(path: str | Path) -> list[str]:
+    source = Path(path).resolve(strict=True)
+    connection = sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        if not _has_trpg_schema(connection):
+            raise ValueError(f"not a TRPG room file: {source}")
+        return [str(row[0]) for row in connection.execute("SELECT id FROM rooms ORDER BY id")]
+    finally:
+        connection.close()
+
+
 def _latest_timestamp(connection: sqlite3.Connection, room_id: str, tables: set[str]) -> str | None:
     timestamps: list[str] = []
     if "events" in tables:
@@ -77,15 +107,22 @@ def _latest_timestamp(connection: sqlite3.Connection, room_id: str, tables: set[
     return max(timestamps, default=None)
 
 
-def list_active_rooms(search_root: str | Path) -> dict[str, Any]:
-    """Discover player-safe metadata for active TRPG rooms without migrating databases."""
+def list_active_rooms(
+    search_root: str | Path, *, include_root: bool = False,
+    include_legacy_default: bool = False,
+) -> dict[str, Any]:
+    """Discover player-safe metadata for active TRPG rooms without migrations."""
     root = Path(search_root).expanduser()
     if not root.is_dir():
         raise ValueError("room search root must be an existing directory")
     root = root.resolve()
     rooms: list[dict[str, Any]] = []
 
-    for database in _candidate_room_databases(root):
+    for database in _candidate_room_databases(
+        root,
+        include_root=include_root,
+        include_legacy_default=include_legacy_default,
+    ):
         try:
             connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row

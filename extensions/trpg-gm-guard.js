@@ -83,9 +83,14 @@ function stripExpandedSkillBlocks(text) {
 }
 
 function isRoomCatalogRequest(text) {
-  const value = stripExpandedSkillBlocks(text);
-  return /(?:列出|顯示|查看|有哪些|清單|list|show).{0,40}(?:TRPG\s*)?(?:遊戲|房間|rooms?|games?)/iu.test(value)
-    || /(?:所有|目前|現在).{0,20}(?:TRPG\s*)?(?:遊戲|房間|rooms?|games?)/iu.test(value);
+  const value = stripExpandedSkillBlocks(text)
+    .replace(/^\/skill:trpg-gm\s*/iu, "")
+    .trim();
+  const polite = "(?:請|麻煩|幫我|可以)?\\s*";
+  const catalog = "(?:列出|顯示|查看|list|show)\\s*(?:所有|目前|現在|active)?\\s*(?:TRPG\\s*)?(?:遊戲|房間|rooms?|games?)(?:\\s*(?:清單|列表))?";
+  const inventory = "(?:有哪些|所有|目前|現在)\\s*(?:active\\s*)?(?:TRPG\\s*)?(?:遊戲|房間|rooms?|games?)";
+  const location = "(?:這個|那個|該|目前)?\\s*(?:TRPG\\s*)?(?:遊戲|房間|room|game)\\s*(?:在?哪裡|位置(?:是什麼)?|where|location)";
+  return new RegExp(`^${polite}(?:${catalog}|${inventory}|${location})\\s*[?？。!！]*$`, "iu").test(value);
 }
 
 function repeatsRejectedActionLiteral(text, action) {
@@ -383,7 +388,7 @@ function freshTurn() {
 function checklist() {
   return [
     "[TRPG GM Guard — mandatory for this turn]",
-    "1. Before player-facing narration, use typed trpg_gm_context to load the exact room and DB. For an out-of-game request to list active games, use trpg_gm_rooms_list instead; that catalog query does not require choosing a room first.",
+    "1. Before player-facing narration, use typed trpg_gm_context to load the exact room and DB. For an out-of-game request to list or locate active games, use trpg_gm_rooms_list instead and omit root for the unified canonical directory; that catalog query does not require choosing a room first.",
     "2. Prefer typed trpg_gm_rooms_list, trpg_gm_action_adjudicate, trpg_gm_check, trpg_gm_entity_upsert, trpg_gm_character_adjust, trpg_gm_character_availability, trpg_gm_canon_set, and trpg_gm_recap_save. Use raw trpg_gm_cli only for unsupported setup/query operations; never use bash or direct SQLite. Read scenario text with read, never file:// web scraping.",
     "3. Persist every confirmed consequence, discovered clue, NPC/quest/scene change, and HP/MP/SAN change before narrating it.",
     "4. Never expose secrets or narrate speech, movement, thoughts, or reactions for any player character, including non-acting party PCs.",
@@ -701,18 +706,19 @@ export default function trpgGmGuard(pi) {
   registerTypedTool({
     name: "trpg_gm_rooms_list",
     label: "TRPG Active Rooms",
-    description: "List player-safe metadata for all active TRPG games beneath a search root. This out-of-game catalog query does not require an exact room context and never migrates room databases.",
+    description: "List player-safe metadata for active TRPG games. Omit root to use the unified canonical room directory; pass root only to search legacy workspace trees. This out-of-game query does not require exact room context and never migrates room databases.",
     parameters: {
-      type: "object", additionalProperties: false, required: ["root"],
+      type: "object", additionalProperties: false, required: [],
       properties: {
-        root: { type: "string", description: "Directory to search recursively for .trpg/rooms directories" },
+        root: { type: "string", description: "Optional legacy workspace root; omit for the canonical ~/.trpg/rooms directory" },
       },
     },
     async execute(_id, params, signal) {
       if (active && !turn.catalogRequest) {
         throw new Error("The active-games catalog may only be used for an explicit room-list request, never to bypass gameplay context or finalization.");
       }
-      const result = await pi.exec(CLI_WRAPPER, ["rooms", "list", params.root], { signal });
+      const args = params.root ? ["rooms", "list", params.root] : ["rooms", "list"];
+      const result = await pi.exec(CLI_WRAPPER, args, { signal });
       if (result.code !== 0) {
         throw new Error(result.stderr || result.stdout || `trpg-gm exited with code ${result.code}`);
       }

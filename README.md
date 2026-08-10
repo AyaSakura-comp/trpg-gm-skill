@@ -103,7 +103,7 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 使用 `/skill:trpg-gm` 後，每個遊戲回合都會看到 `TRPG GM Guard` checklist；agent 也會取得 typed gameplay tools、raw fallback `trpg_gm_cli` 與 `trpg_turn_finalize`。Extension 會：
 
 1. 在 `before_agent_start` 注入當回合檢查表。
-2. 以 `trpg_gm_rooms_list` 安全列出 workspace 內目前 active 的遊戲；gameplay 則優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
+2. 以 `trpg_gm_rooms_list` 安全列出 canonical directory 內目前 active 的遊戲；gameplay 則優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
 3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；DB guardrail 命中時會把錯誤的 `accepted` 強制改成 `rejected`。被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
 4. 角色生成後，要求 GM 先根據已保存的角色背景／概念設定具體開場 chapter/objective，呈現玩家可感知的故事背景並交還第一個行動選擇；完成前拒絕玩家 action 與 finalization。
 5. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密、玩家自主權及詳細敘事品質的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
@@ -113,13 +113,21 @@ Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Pyt
 
 ### 列出目前正在遊玩的房間
 
-使用 typed `trpg_gm_rooms_list` 並傳入 workspace `root`，即可遞迴尋找標準 `.trpg/rooms/` 目錄中的 active 遊戲。這是 read-only、player-safe 的全域 catalog 查詢，不需要先指定 room 或載入 context；輸出包含 room id、規則系統、角色數、最近活動時間與 canonical DB path，不包含劇本路徑、canon、entities 或 GM secrets。非 TRPG 檔案會被忽略，資料庫不會因列清單而執行 migration。
+使用 typed `trpg_gm_rooms_list` 並省略 `root`，即可列出統一 canonical room directory 中的 active 遊戲。預設位置由使用者 home 決定，也可用 `TRPG_GM_ROOMS_DIR` 部署級覆寫；只有搜尋尚未遷移的 legacy workspace 時才傳入 `root`。這是 read-only、player-safe 的全域 catalog 查詢，不需要先指定 room 或載入 context；輸出包含 room id、規則系統、角色數、最近活動時間與 canonical path，不包含劇本路徑、canon、entities 或 GM secrets。非 TRPG 檔案會被忽略，列清單不會執行 migration。
 
 CLI 等價指令：
 
 ```bash
-$GM rooms list /absolute/workspace/root
+$GM rooms list
 ```
+
+經確認後，可統一搬移 active legacy rooms，並在舊位置留下相容 alias，避免舊 session 失效：
+
+```bash
+$GM rooms relocate /absolute/legacy/search/root
+```
+
+Relocation 會納入 pre-v0.15 legacy default 並先完整 preflight；遇到重複 room id、既有 canonical target、多 room 檔案、WAL／sidecar，或無法取得 exclusive maintenance lock 時整批拒絕，不覆寫現有 canonical 狀態。
 
 ### GM 負責詳細講述故事
 
@@ -453,7 +461,7 @@ Python 程式位於 `src/trpg_gm/`。它不創作故事，也不自行決定 NPC
 
 ### `catalog.py`
 
-以 read-only 方式搜尋 workspace tree 中的標準 `.trpg/rooms/` 目錄，辨識有效 TRPG DB，篩選 `status=active`，並只回傳 player-safe metadata。它不會建立、遷移或修改 room，也不會輸出 script path、canon、entities 或 recap 內容。
+以 read-only 方式列出 canonical room directory，或在明確指定 root 時搜尋 legacy workspace tree，辨識有效 TRPG room，篩選 `status=active`，並只回傳 player-safe metadata。它不會建立、遷移或修改 room，也不會輸出 script path、canon、entities 或 recap 內容。
 
 ### `store.py`
 
@@ -485,7 +493,7 @@ Python 只計算並記錄結果；如何把成功或失敗轉化成遊戲情節�
 
 SQLite 是遊戲狀態的持久化來源。即使 agent 重啟、對話被截斷或換了一個 session，只要它重新載入同一個 room DB，就能取得必要狀態。
 
-建議每個 room 使用獨立檔案：
+所有 agent 預設在同一個使用者層級 canonical directory（`~/.trpg/rooms/`）中，為每個 room 使用獨立檔案；`TRPG_GM_ROOMS_DIR` 可統一覆寫該目錄。Legacy workspace 路徑仍可透過 explicit option 讀取：
 
 ```text
 .trpg/rooms/<room-id>.sqlite3
