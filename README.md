@@ -113,7 +113,7 @@ Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Pyt
 
 ### GM 負責詳細講述故事
 
-GM 不能只回報資料庫狀態或用幾句摘要跳過場景。每個 gameplay 場景都應以小說式的具體段落呈現玩家可感知的世界：交代空間布局、出入口與物件位置，選擇有辨識度的視覺、聲音、氣味、溫度或觸感，描寫 NPC 的語氣、表情、動作，以及背景環境如何持續活動。事件發生時要寫出過程、可見後果與場景前後的變化，而不只說「成功」「失敗」或「出現敵人」。
+GM 不能只回報資料庫狀態或用幾句摘要跳過場景。每個 gameplay 場景都應以小說式的具體段落呈現玩家可感知的世界：交代空間布局、出入口與物件位置，選擇有辨識度的視覺、聲音、氣味、溫度或觸感，描寫 NPC 的語氣、表情、動作，以及背景環境如何持續活動。事件發生時要寫出過程、可見後果與場景前後的變化，而不只說「成功」「失敗」或「出現敵人」。Rejected action 還要說明缺少的前置條件，並提供精簡、grounded、非強迫的可行下一步（通常一至三個）；只能引用已建立的障礙、工具、路徑或 NPC，不得捏造尚未發現的解法或保證成功。
 
 細節必須服務氣氛、空間理解、壓力與玩家選擇，並以劇本、canon 和已保存狀態為準；命名、可重用或會影響後續的新增細節仍須先持久化。詳細敘事只擴充 GM 控制的世界與 NPC，不授權 GM 替任何玩家角色補寫思想、情緒、台詞、移動、決定或反應。`trpg_turn_finalize` 因此要求 `narrativeDetailChecked=true`，確認 gameplay 回覆已達到這項標準。
 
@@ -398,7 +398,7 @@ Extension 使用 Pi lifecycle API：
 - `before_agent_start`：每回合注入 context、狀態保存、秘密資訊及玩家自主權 checklist。
 - Typed gameplay tools：`trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 使用命名欄位與 JSON object，避免模型漏掉 `adjudicate`、room、entity name、傳入非法 decision 或組出壞 JSON。
 - Raw `trpg_gm_cli` fallback：只供 typed tools 尚未涵蓋的 setup/query；以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens。所有工具都在成功後才記錄 exact room、context、玩家行動裁定、check 與 mutation；失敗不更新 guard 狀態。
-- `message_end`：每個新的 user message 都重設 turn-local adjudication／finalization 狀態，避免 Piweb／RPC 未觸發 `input` hook 時沿用上一回合；不合格的 assistant 回覆會被替換成空內容，並以隱藏的 `TRPG_TURN_NOT_FINALIZED`、`TRPG_ACTION_NARRATIVE_TOO_TERSE` 或 `TRPG_REJECTED_ACTION_REPLAYED` follow-up 回傳 agent，立即觸發同回合自我修正，而不是把內部 Guard 訊息顯示給玩家；連續三次仍未修正時停止自動循環，並以不含內部代碼的玩家安全文字說明鎖住原因：尚未完成狀態確認與保存、缺少完整場景敘事，或仍可能把 rejected action 誤寫成已發生；最後提示重新送出上一個行動。
+- `message_end`：每個新的 user message 都重設 turn-local adjudication／finalization 狀態，避免 Piweb／RPC 未觸發 `input` hook 時沿用上一回合；不合格的 assistant 回覆會被替換成空內容，並以隱藏的 `TRPG_TURN_NOT_FINALIZED`、`TRPG_ACTION_NARRATIVE_TOO_TERSE` 或 `TRPG_REJECTED_ACTION_REPLAYED` follow-up 回傳 agent，立即觸發同回合自我修正，而不是把內部 Guard 訊息顯示給玩家；連續三次仍未修正時停止自動循環，並以不含內部代碼的玩家安全文字說明鎖住原因：尚未完成狀態確認與保存、缺少完整場景敘事，或仍可能把 rejected action 誤寫成已發生；同時提供對應的可執行建議，例如原樣重送以重新載入／保存、維持角色意圖重送以補齊敘事，或先調查障礙、尋找已存在的工具／其他路徑來建立前置條件。
 - `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，作為 fallback 排入一次 follow-up。
 - Session custom entry：保存 guard 已啟用狀態，使 `/reload` 或 resume 後仍可恢復。
 
@@ -951,7 +951,7 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 - Session 收尾保存 player-safe recap；舊團入口顯示 recap，而不是完整私密 context。
 - 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
 
-本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事、[`QWEN_EVERY_ACTION_NARRATIVE_E2E.md`](docs/QWEN_EVERY_ACTION_NARRATIVE_E2E.md) 的每次 accepted／rejected 行動小說回覆 hook、[`QWEN_HIDDEN_GUARD_RETRY_E2E.md`](docs/QWEN_HIDDEN_GUARD_RETRY_E2E.md) 的隱藏 error code 與 agent 自我修正、[`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場，以及 [`QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md`](docs/QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md) 的時代背景優先犯罪行動裁定。
+本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事、[`QWEN_EVERY_ACTION_NARRATIVE_E2E.md`](docs/QWEN_EVERY_ACTION_NARRATIVE_E2E.md) 的每次 accepted／rejected 行動小說回覆 hook、[`QWEN_HIDDEN_GUARD_RETRY_E2E.md`](docs/QWEN_HIDDEN_GUARD_RETRY_E2E.md) 的隱藏 error code 與 agent 自我修正、[`QWEN_REJECTED_NEXT_STEP_E2E.md`](docs/QWEN_REJECTED_NEXT_STEP_E2E.md) 的 rejected action 前置條件與可行下一步建議、[`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場，以及 [`QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md`](docs/QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md) 的時代背景優先犯罪行動裁定。
 
 ## 目前邊界
 
@@ -988,7 +988,8 @@ trpg-gm-skill/
 │   ├── QWEN_HIDDEN_GUARD_RETRY_E2E.md
 │   ├── QWEN_MTP_GUARDRAIL_PLAYTEST.md
 │   ├── QWEN_NARRATIVE_DETAIL_E2E.md
-│   └── QWEN_OPENING_GUIDANCE_E2E.md
+│   ├── QWEN_OPENING_GUIDANCE_E2E.md
+│   └── QWEN_REJECTED_NEXT_STEP_E2E.md
 ├── package.json
 ├── pyproject.toml
 └── README.md

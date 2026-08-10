@@ -167,6 +167,8 @@ test("every accepted or rejected action injects a novel-like response requiremen
   assert.match(guidance, /每一(?:次|個).*行動.*小說/s);
   assert.match(guidance, /(?:rejected|拒絕|不允許).*(?:小說|敘事)|(?:小說|敘事).*(?:rejected|拒絕|不允許)/s);
   assert.match(guidance, /不得.*(?:只|僅).*(?:做了什麼|摘要|裁定).*(?:要怎麼做|下一位)/s);
+  assert.match(guidance, /(?:rejected|拒絕|不允許).*(?:前置條件|下一步|可嘗試|先.+再)/s);
+  assert.match(guidance, /(?:建議|suggest).*(?:不得強迫|不強迫|open-ended|non-prescriptive)/is);
 
   const pi = createFakePi();
   trpgGuard(pi);
@@ -184,6 +186,8 @@ test("every accepted or rejected action injects a novel-like response requiremen
   assert.match(injection.message.content, /rejected/i);
   assert.match(injection.message.content, /novel-like/i);
   assert.match(injection.message.content, /never respond only with/i);
+  assert.match(injection.message.content, /grounded.*(?:next step|prerequisite)/i);
+  assert.match(injection.message.content, /non-prescriptive|do not force/i);
 });
 
 test("finalizer requires an explicit detailed-narration confirmation", async () => {
@@ -894,16 +898,21 @@ test("unfinalized text-only player responses are blocked", async () => {
 
 test("retry exhaustion explains each player-safe lock reason without internal codes", () => {
   const expectations = [
-    ["TRPG_TURN_NOT_FINALIZED", /狀態確認與保存/],
-    ["TRPG_ACTION_NARRATIVE_TOO_TERSE", /完整的場景敘事/],
-    ["TRPG_REJECTED_ACTION_REPLAYED", /被拒絕的行動.*已經發生/],
+    ["TRPG_TURN_NOT_FINALIZED", /狀態確認與保存/, /先原樣重新送出上一個行動/, /重新送出上一個行動/],
+    ["TRPG_ACTION_NARRATIVE_TOO_TERSE", /完整的場景敘事/, /不必改變角色意圖.*重新送出/, /重新送出上一個行動/],
+    ["TRPG_REJECTED_ACTION_REPLAYED", /被拒絕的行動.*已經發生/, /先調查阻礙.*尋找.*工具.*其他路徑/s, /送出下一個想嘗試的行動/],
   ];
-  for (const [code, reason] of expectations) {
+  for (const [code, reason, suggestion, nextPrompt] of expectations) {
     const message = playerSafeCorrectionFailure(code);
     assert.match(message, /本回合已暫停/);
     assert.match(message, reason);
+    assert.match(message, suggestion);
+    assert.match(message, /建議/);
     assert.match(message, /沒有送出/);
-    assert.match(message, /重新送出上一個行動/);
+    assert.match(message, nextPrompt);
+    if (code === "TRPG_REJECTED_ACTION_REPLAYED") {
+      assert.doesNotMatch(message, /請重新送出上一個行動/);
+    }
     assert.doesNotMatch(message, /TRPG_|Guard|finalized/iu);
   }
 });

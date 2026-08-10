@@ -62,7 +62,18 @@ export function playerSafeCorrectionFailure(code) {
     TRPG_ACTION_NARRATIVE_TOO_TERSE: "系統連續三次都未能產生完整的場景敘事，因此沒有送出只有裁定摘要的回覆。",
     TRPG_REJECTED_ACTION_REPLAYED: "系統連續三次仍可能把被拒絕的行動誤寫成已經發生，因此沒有送出可能改寫場景的回覆。",
   };
-  return `本回合已暫停：${reasons[code] ?? "系統連續三次未能產生符合規則且狀態一致的回覆，因此沒有送出結果。"}請重新送出上一個行動。`;
+  const suggestions = {
+    TRPG_TURN_NOT_FINALIZED: "建議：先原樣重新送出上一個行動，讓系統重新載入房間、完成裁定並保存結果；完成後才會繼續敘述。",
+    TRPG_ACTION_NARRATIVE_TOO_TERSE: "建議：不必改變角色意圖，先重新送出上一個行動；系統會補齊場景與感官敘事後再呈現裁定。",
+    TRPG_REJECTED_ACTION_REPLAYED: "建議：先調查阻礙、尋找場景中已存在的可用工具或其他路徑，取得可行的前置條件後再嘗試原目標。",
+  };
+  const endings = {
+    TRPG_REJECTED_ACTION_REPLAYED: "請根據目前可見資訊，送出下一個想嘗試的行動。",
+  };
+  const reason = reasons[code] ?? "系統連續三次未能產生符合規則且狀態一致的回覆，因此沒有送出結果。";
+  const suggestion = suggestions[code] ?? "建議：先重新描述角色想達成的目標，並詢問目前可見的阻礙與可行前置條件。";
+  const ending = endings[code] ?? "請重新送出上一個行動。";
+  return `本回合已暫停：${reason}${suggestion}${ending}`;
 }
 
 function stripExpandedSkillBlocks(text) {
@@ -378,7 +389,7 @@ function checklist() {
     "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
     "13. Use context.participation to give equal spotlight opportunities to all eligible players. Prefer next_spotlight_character_ids when inviting the next action. Only exclude a character whose persisted availability or HP says they cannot act; record other temporary inability with trpg_gm_character_availability.",
     "14. Read context.story_progress. After each accepted, countable player action, persist advanced or stalled with trpg_gm_story_progress. At three consecutive stalled actions, persist a concrete in-world event with trpg_gm_story_intervene before narrating or accepting another action; never replace the objective to evade this clock. A forced transition must happen directly through the world event, not by requiring the player to choose a prescribed option. After the scene changes, return an open-ended action prompt and confirm eventDrivenTransitionChecked=true.",
-    "15. The GM is the storyteller: every accepted or rejected action, including one blocked by rules or impossibility, requires at least a short novel-like passage grounded in player-visible facts. For a rejected action, narrate the established obstacle, unchanged surroundings, or NPC/world response without making the rejected action occur or mutating the world, then state the reason and basis. Never respond only with a ruling summary such as ‘X did something / not allowed; what does Y do?’ and immediately hand off. Establish concrete objects, sensory atmosphere, and world activity without deciding a player character's thoughts, feelings, speech, movement, or reaction. Confirm this with narrativeDetailChecked=true.",
+    "15. The GM is the storyteller: every accepted or rejected action, including one blocked by rules or impossibility, requires at least a short novel-like passage grounded in player-visible facts. For a rejected action, narrate the established obstacle, unchanged surroundings, or NPC/world response without making the rejected action occur or mutating the world, then state the reason and basis. Also offer a concise set of grounded next steps or prerequisites (normally one to three) that could make progress possible, such as inspecting the obstacle, obtaining an established tool, or finding another route; keep them non-prescriptive, do not force a choice, and do not invent undiscovered facts. Never respond only with a ruling summary such as ‘X did something / not allowed; what does Y do?’ and immediately hand off. Establish concrete objects, sensory atmosphere, and world activity without deciding a player character's thoughts, feelings, speech, movement, or reaction. Confirm this with narrativeDetailChecked=true.",
     "16. Adjudicate fictional actions by the setting's time and place（時空背景）. Never reject solely because modern law（現代法律）, contemporary customs, morality, or political correctness（政治正確）disapproves; if the action is possible under scenario, canon, capabilities, scene, and rules, accept the attempt and apply era-grounded risks and consequences（後果）. Create guardrails only from explicit scenario/canon prohibitions or player-agreed table boundaries, not inferred modern norms.",
   ].join("\n");
 }
