@@ -1119,28 +1119,69 @@ test("finalizer rejects a turn without context or persisted state accounting", a
   );
 });
 
-test("finalizer requires the least-participating eligible player as next spotlight", async () => {
+test("finalizer rotates spotlight by least recent action instead of lifetime count", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
   const ctx = context();
   await pi.handlers.get("input")(
-    { text: "我檢查門縫", source: "interactive" },
+    { text: "確認下一位行動者", source: "interactive" },
     ctx,
   );
   pi.execResult = { code: 0, stdout: JSON.stringify({
     participation: {
       characters: [
-        { character_id: "alice", can_act: true, action_count: 2 },
-        { character_id: "bob", can_act: true, action_count: 0 },
+        { character_id: "tokiyuki", can_act: true, action_count: 9, last_action_event_id: 48 },
+        { character_id: "hoki", can_act: true, action_count: 6, last_action_event_id: 66 },
+        { character_id: "yoyi-perfect", can_act: true, action_count: 6, last_action_event_id: 63 },
       ],
-      eligible_character_ids: ["alice", "bob"],
-      next_spotlight_character_ids: ["bob"],
+      eligible_character_ids: ["tokiyuki", "hoki", "yoyi-perfect"],
+      next_spotlight_character_ids: ["tokiyuki"],
     },
   }), stderr: "", killed: false };
   await pi.tools.get("trpg_gm_context").execute("context", {
     db: "/tmp/game.db", room: "room-a",
   });
-  await runAction(pi, { characterId: "alice", action: "我檢查門縫", db: "/tmp/game.db" });
+  const finalize = pi.tools.get("trpg_turn_finalize");
+  const base = {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "not_applicable",
+    noPlayerActionReason: "此回合只確認下一位 spotlight，沒有角色行動",
+    stateChanges: [], noStateChangeReason: "沒有世界狀態變化",
+    secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
+  };
+
+  await assert.rejects(() => finalize.execute("finalize", base), /nextSpotlightCharacterId/);
+  await assert.rejects(
+    () => finalize.execute("finalize", { ...base, nextSpotlightCharacterId: "yoyi-perfect" }),
+    /must prioritize.*tokiyuki/i,
+  );
+  await finalize.execute("finalize", { ...base, nextSpotlightCharacterId: "tokiyuki" });
+});
+
+test("accepted action advances the in-memory least-recent spotlight", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "北條檢查珍珠堆", source: "interactive" },
+    ctx,
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: {
+      characters: [
+        { character_id: "tokiyuki", can_act: true, action_count: 9, last_action_event_id: 48 },
+        { character_id: "hoki", can_act: true, action_count: 6, last_action_event_id: 66 },
+        { character_id: "yoyi-perfect", can_act: true, action_count: 6, last_action_event_id: 63 },
+      ],
+      eligible_character_ids: ["tokiyuki", "hoki", "yoyi-perfect"],
+      next_spotlight_character_ids: ["tokiyuki"],
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await runAction(pi, {
+    characterId: "tokiyuki", action: "北條檢查珍珠堆", db: "/tmp/game.db",
+  });
   await runProgress(pi);
   const finalize = pi.tools.get("trpg_turn_finalize");
   const base = {
@@ -1149,12 +1190,13 @@ test("finalizer requires the least-participating eligible player as next spotlig
     secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
   };
 
-  await assert.rejects(() => finalize.execute("finalize", base), /nextSpotlightCharacterId/);
   await assert.rejects(
-    () => finalize.execute("finalize", { ...base, nextSpotlightCharacterId: "alice" }),
-    /must prioritize.*bob/i,
+    () => finalize.execute("wrong-next", { ...base, nextSpotlightCharacterId: "tokiyuki" }),
+    /must prioritize.*yoyi-perfect/i,
   );
-  await finalize.execute("finalize", { ...base, nextSpotlightCharacterId: "bob" });
+  await finalize.execute("correct-next", {
+    ...base, nextSpotlightCharacterId: "yoyi-perfect",
+  });
 });
 
 test("successful finalization prevents follow-up reminders", async () => {

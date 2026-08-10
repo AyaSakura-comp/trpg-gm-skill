@@ -82,6 +82,42 @@ class GameStoreTests(unittest.TestCase):
             self.assertFalse(by_id["carol"]["can_act"])
             self.assertEqual(by_id["carol"]["unavailable_reason"], "遭束縛，尚未脫困")
 
+    def test_spotlight_rotates_to_the_least_recent_actor_instead_of_punishing_lifetime_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            for character_id, name in (("alice", "艾莉絲"), ("bob", "鮑伯"), ("carol", "卡蘿")):
+                store.add_character("room-a", character_id, name, hp=10, mp=8, san=55)
+            with store._connect() as db:
+                for character_id in ("alice", "alice", "alice", "bob", "carol"):
+                    store._append_event(
+                        db, "room-a", "action_adjudicated",
+                        {
+                            "character_id": character_id,
+                            "action": "舊版主持期間的主要行動",
+                            "decision": "accepted",
+                            "basis": "legacy event",
+                            "reason": "legacy event",
+                        },
+                    )
+                    action_event_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    store._append_event(
+                        db, "room-a", "story_progress_recorded",
+                        {
+                            "action_event_id": action_event_id,
+                            "status": "advanced",
+                            "reason": "legacy event assessed",
+                        },
+                    )
+
+            participation = store.get_context("room-a")["participation"]
+            self.assertEqual(participation["next_spotlight_character_ids"], ["alice"])
+            accepted = store.adjudicate_action(
+                "room-a", "alice", "輪到我調查門邊", decision="accepted",
+                basis="持久化輪替已輪到此角色", reason="艾莉絲最久未取得主要行動",
+            )
+            self.assertEqual(accepted["decision"], "accepted")
+
     def test_action_from_non_priority_character_is_forced_rejected_without_consuming_spotlight(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.db")
@@ -350,6 +386,23 @@ class GameStoreTests(unittest.TestCase):
             self.assertEqual(accepted["decision"], "accepted")
             participant = store.get_context("room-a")["participation"]["characters"][0]
             self.assertEqual(participant["action_count"], 1)
+
+    def test_ordinary_rejected_action_does_not_consume_spotlight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.add_character("room-a", "bob", "鮑伯", hp=10, mp=8, san=55)
+
+            store.adjudicate_action(
+                "room-a", "alice", "我徒手拆掉鋼門", decision="rejected",
+                basis="鋼門無法徒手拆除", reason="缺少適當工具",
+            )
+
+            participation = store.get_context("room-a")["participation"]
+            self.assertEqual(
+                participation["next_spotlight_character_ids"], ["alice", "bob"]
+            )
 
     def test_guardrail_rejection_does_not_consume_spotlight(self):
         with tempfile.TemporaryDirectory() as directory:

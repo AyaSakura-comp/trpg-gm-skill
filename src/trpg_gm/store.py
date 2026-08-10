@@ -316,8 +316,10 @@ class GameStore:
             if character_id not in action_counts:
                 continue
             action_counts[character_id] += 1
-            accepted_counts[character_id] += event["payload"].get("decision") == "accepted"
-            last_action_event_ids[character_id] = event["id"]
+            accepted = event["payload"].get("decision") == "accepted"
+            accepted_counts[character_id] += accepted
+            if accepted:
+                last_action_event_ids[character_id] = event["id"]
 
         characters = []
         for row in rows:
@@ -341,20 +343,23 @@ class GameStore:
                 }
             )
         eligible = [item for item in characters if item["can_act"]]
-        minimum = min((item["action_count"] for item in eligible), default=None)
+        oldest_action_event_id = min(
+            (
+                item["last_action_event_id"]
+                if item["last_action_event_id"] is not None
+                else -1
+                for item in eligible
+            ),
+            default=None,
+        )
         priorities = [
-            item for item in eligible if item["action_count"] == minimum
+            item for item in eligible
+            if (
+                item["last_action_event_id"]
+                if item["last_action_event_id"] is not None
+                else -1
+            ) == oldest_action_event_id
         ]
-        if len(priorities) > 1:
-            most_recent = max(
-                priorities,
-                key=lambda item: item["last_action_event_id"] or -1,
-            )
-            if most_recent["last_action_event_id"] is not None:
-                priorities = [
-                    item for item in priorities
-                    if item["character_id"] != most_recent["character_id"]
-                ]
         return {
             "characters": characters,
             "eligible_character_ids": [item["character_id"] for item in eligible],
@@ -362,8 +367,9 @@ class GameStore:
                 item["character_id"] for item in priorities
             ],
             "action_count_gap": (
-                max(item["action_count"] for item in eligible) - minimum
-                if minimum is not None else 0
+                max(item["action_count"] for item in eligible)
+                - min(item["action_count"] for item in eligible)
+                if eligible else 0
             ),
         }
 

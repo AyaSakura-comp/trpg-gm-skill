@@ -77,7 +77,7 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 2. **載入狀態**：每次回覆遊戲內容前必須執行 `context <room-id>`。
 3. **處理劇本**：讀取 `room.script_path`。有路徑但檔案不存在時停止遊戲並請玩家修正。沒有路徑時，先提醒可提供劇本；若玩家要直接開始，就即興建立 premise、主要衝突與初始場景，並以 `canon`/`entity` 儲存。
 4. **一致性檢查**：以劇本、canon、角色卡、entities、recent_events、`context.guardrails` 與規則為準。資訊不足時只補最小必要細節並立刻保存；不可悄悄改寫既有事實。持久化 guardrail 不可覆寫或忽略。
-5. **公平聚光燈**：讀取 `context.participation`。GM 必須讓每個目前可行動的玩家獲得平等的參與與決策機會；只有 `next_spotlight_character_ids` 中累積行動最少的角色可開始下一個主要行動；多人次數相同時，剛完成上一個行動的角色必須先讓其他同次數角色獲得機會。核心會在寫入前強制拒絕其他角色搶先行動，且該拒絕不消耗 spotlight。不可因某位玩家積極就長期只讓該角色推進劇情。被邀請不等於 GM 代替該玩家行動，玩家可以放棄機會。只有 HP 已降至 0，或已用 `character availability --can-act false` 保存昏迷、束縛、離場等確定狀態的角色，才可暫時排除；狀態解除後必須立即恢復 `canAct=true`。
+5. **公平聚光燈**：讀取 `context.participation`。GM 必須讓每個目前可行動的玩家獲得平等的參與與決策機會；只有 `next_spotlight_character_ids` 中最久未完成已接受主要行動的角色可開始下一個主要行動，尚未行動者最優先。舊的累積行動次數只作統計，不得用來長期懲罰或跳過角色。核心會在寫入前強制拒絕其他角色搶先行動，任何 rejected action 都不消耗 spotlight。不可因某位玩家積極就長期只讓該角色推進劇情。被邀請不等於 GM 代替該玩家行動，玩家可以放棄機會。只有 HP 已降至 0，或已用 `character availability --can-act false` 保存昏迷、束縛、離場等確定狀態的角色，才可暫時排除；狀態解除後必須立即恢復 `canAct=true`。
 6. **創角後優先開場**：若 `context.story_progress.opening_guidance_required=true`，代表角色已生成但故事尚未銜接。先根據 `opening_character_ids` 對應角色已保存的背景與概念，用 `story objective --opening-character-ids '[...]'` 保存具體章節與開場目標，並在 reason 逐一引用每名角色的原始背景或概念；接著只描述角色可感知的時空、事件與誘因，將第一個行動選擇交還玩家。開場不得替玩家角色決定為何到場、說什麼、如何反應或是否接受任務。完成此前不得接受玩家 action。
 7. **劇情推進時鐘**：讀取 `context.story_progress` 的目前章節、目標與 `stagnant_action_count`。每個被接受、可實際改變局面的玩家 action 裁定後，都必須用 `story progress --status advanced|stalled` 誠實記錄是否真正推進章節或目標；換地點、重複搜索或只有氣氛變化不算自動推進。連續第三次 `stalled` 時，GM 必須立即用 `story intervene` 保存一個具體的世界事件及其 `intended_progress`，再敘述該事件；不得改目標、繼續接受第四個 action 或虛報 advanced 來清零。需要強制轉場時，必須讓 NPC 行動、敵方攻勢、天候、災害、交通抵達、入口自行開啟或其他劇情事件直接改變場景，不得停下來逼玩家選擇某個特定選項才准轉場。事件發生後提供開放行動空間，詢問玩家如何回應；不得替玩家角色做決定，也不得保證檢定成功。
 8. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。不得僅因行動違反現代法律、當代風俗習慣、道德期待或政治正確而拒絕；以遊戲內時空背景裁定可行性，並在世界中呈現合乎時代的風險與後果。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
@@ -116,7 +116,7 @@ TRPG 行動是虛構世界中的宣告。不得把現代法律、當代風俗習
 
 ## 多玩家公平參與
 
-`context.participation.characters` 會持久化呈現每名角色的 `action_count`、`accepted_action_count`、`last_action_event_id`、`can_act` 與不能行動的原因。`eligible_character_ids` 是目前能參與者；`next_spotlight_character_ids` 是其中累積行動最少、下一個可開始主要行動的角色。被拒絕的合理嘗試也算玩家已參與一次，避免 GM 以裁定結果抹去玩家的發言機會；但 availability、guardrail 或 spotlight 順序造成的機械性拒絕不計數。
+`context.participation.characters` 會持久化呈現每名角色的 `action_count`、`accepted_action_count`、`last_action_event_id`、`can_act` 與不能行動的原因。`eligible_character_ids` 是目前能參與者；`next_spotlight_character_ids` 是其中最久未完成已接受主要行動、下一個可開始主要行動的角色。Rejected attempt 可保留在 `action_count` 統計中，但不更新 `last_action_event_id`，因此不會消耗或轉移 spotlight；availability、guardrail 或 spotlight 順序造成的機械性拒絕同樣不計數。
 
 公平指「平等獲得有意義的選擇、發言與主要行動機會」，不是強迫所有玩家採取相同行動。玩家仍可自由對話，但搶先宣告的下一個主要行動會在持久化裁定時被拒絕，直到較少參與的角色行動或以 persisted availability 明確放棄／暫時不能行動。GM 應在場景轉換、調查分工、戰鬥輪替及 NPC 對話時主動把下一個決策點交給較少參與的可行動玩家。不得把安靜、失敗或技能較低當成跳過玩家的理由。
 

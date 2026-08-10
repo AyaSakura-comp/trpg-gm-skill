@@ -143,7 +143,7 @@ GM 不能只回報資料庫狀態或用幾句摘要跳過場景。每個 gamepla
 
 ### 多玩家公平參與
 
-每次 `context` 都包含持久化的 `participation` 摘要：各角色累積行動、已接受行動、最後行動事件、目前是否能行動，以及 `next_spotlight_character_ids`。只有累積行動最少且仍能行動的優先角色可以開始下一個主要行動；多人次數相同時，剛完成上一個行動的角色會暫時讓位給其他同次數角色。SQLite 核心會在事件計數或判定前把其他角色的搶先行動強制改為 `rejected`，且不消耗 spotlight。多人仍可行動時，`trpg_turn_finalize` 也會要求 `nextSpotlightCharacterId`，形成前置裁定與回合結尾兩層防護。
+每次 `context` 都包含持久化的 `participation` 摘要：各角色累積行動、已接受行動、最後一次已接受的主要行動事件、目前是否能行動，以及 `next_spotlight_character_ids`。目前能行動且最久未完成主要行動的角色優先；尚未行動者最先獲得機會，舊的累積次數只作統計，不會使角色被懲罰性跳過。SQLite 核心會在事件計數或判定前把其他角色的搶先行動強制改為 `rejected`；任何 rejected action 都不消耗 spotlight。多人仍可行動時，`trpg_turn_finalize` 也會要求 `nextSpotlightCharacterId`，形成前置裁定與回合結尾兩層防護。
 
 HP 為 0 的角色會自動排除。其他確定的昏迷、束縛、石化、離場或玩家明確放棄本次機會，必須透過 `trpg_gm_character_availability` 保存原因；狀態解除後恢復 `canAct=true`。這裡追蹤的是平等的「有意義參與機會」；玩家仍可自由對話，但不能連續壟斷主要行動，也不允許 GM 為湊數代替玩家宣告行動。
 

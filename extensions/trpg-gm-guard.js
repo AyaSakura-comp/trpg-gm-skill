@@ -299,6 +299,9 @@ function parseParticipation(stdout) {
       characterId: String(character.character_id),
       canAct: character.can_act === true,
       actionCount: Number(character.action_count) || 0,
+      lastActionEventId: Number.isInteger(character.last_action_event_id)
+        ? character.last_action_event_id
+        : null,
       unavailableReason: character.unavailable_reason ?? null,
     }));
   } catch {
@@ -340,9 +343,11 @@ function parseStoryProgress(stdout) {
 
 function nextSpotlightCharacterIds(participation) {
   const eligible = (participation ?? []).filter((character) => character.canAct);
-  const minimum = Math.min(...eligible.map((character) => character.actionCount));
+  const oldestActionEventId = Math.min(
+    ...eligible.map((character) => character.lastActionEventId ?? -1),
+  );
   return eligible
-    .filter((character) => character.actionCount === minimum)
+    .filter((character) => (character.lastActionEventId ?? -1) === oldestActionEventId)
     .map((character) => character.characterId);
 }
 
@@ -641,7 +646,17 @@ export default function trpgGmGuard(pi) {
         const participant = turn.participation?.find(
           (character) => character.characterId === adjudication.characterId,
         );
-        if (countsAsParticipation && participant) participant.actionCount += 1;
+        if (countsAsParticipation && participant) {
+          participant.actionCount += 1;
+          if (adjudication.decision === "accepted") {
+            participant.lastActionEventId = Math.max(
+              0,
+              ...(turn.participation ?? []).map(
+                (character) => character.lastActionEventId ?? 0,
+              ),
+            ) + 1;
+          }
+        }
       } catch {
         // parseActionAdjudication already validated the required persisted fields.
       }
