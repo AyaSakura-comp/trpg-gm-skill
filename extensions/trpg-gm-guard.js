@@ -82,6 +82,12 @@ function stripExpandedSkillBlocks(text) {
     .trim();
 }
 
+function isRoomCatalogRequest(text) {
+  const value = stripExpandedSkillBlocks(text);
+  return /(?:列出|顯示|查看|有哪些|清單|list|show).{0,40}(?:TRPG\s*)?(?:遊戲|房間|rooms?|games?)/iu.test(value)
+    || /(?:所有|目前|現在).{0,20}(?:TRPG\s*)?(?:遊戲|房間|rooms?|games?)/iu.test(value);
+}
+
 function repeatsRejectedActionLiteral(text, action) {
   const normalize = (value) => String(value ?? "")
     .normalize("NFKC")
@@ -369,14 +375,16 @@ function freshTurn() {
     playerFacingNarrativeValidated: false,
     correctionAttempts: 0,
     reminderSent: false,
+    catalogRequest: false,
+    catalogQueried: false,
   };
 }
 
 function checklist() {
   return [
     "[TRPG GM Guard — mandatory for this turn]",
-    "1. Before player-facing narration, use typed trpg_gm_context to load the exact room and DB.",
-    "2. Prefer typed trpg_gm_action_adjudicate, trpg_gm_check, trpg_gm_entity_upsert, trpg_gm_character_adjust, trpg_gm_character_availability, trpg_gm_canon_set, and trpg_gm_recap_save. Use raw trpg_gm_cli only for unsupported setup/query operations; never use bash or direct SQLite. Read scenario text with read, never file:// web scraping.",
+    "1. Before player-facing narration, use typed trpg_gm_context to load the exact room and DB. For an out-of-game request to list active games, use trpg_gm_rooms_list instead; that catalog query does not require choosing a room first.",
+    "2. Prefer typed trpg_gm_rooms_list, trpg_gm_action_adjudicate, trpg_gm_check, trpg_gm_entity_upsert, trpg_gm_character_adjust, trpg_gm_character_availability, trpg_gm_canon_set, and trpg_gm_recap_save. Use raw trpg_gm_cli only for unsupported setup/query operations; never use bash or direct SQLite. Read scenario text with read, never file:// web scraping.",
     "3. Persist every confirmed consequence, discovered clue, NPC/quest/scene change, and HP/MP/SAN change before narrating it.",
     "4. Never expose secrets or narrate speech, movement, thoughts, or reactions for any player character, including non-acting party PCs.",
     "5. After all state commands finish, call trpg_turn_finalize in a separate tool round before the final player-facing answer.",
@@ -421,6 +429,7 @@ export default function trpgGmGuard(pi) {
     turn = freshTurn();
     turn.playerInput = String(event.text ?? "");
     turn.setupMode = /(?:開新團|建立新團|new campaign|campaign setup)/iu.test(turn.playerInput);
+    turn.catalogRequest = isRoomCatalogRequest(turn.playerInput);
     if (shouldActivate) activate();
   });
 
@@ -430,7 +439,10 @@ export default function trpgGmGuard(pi) {
       turn = freshTurn();
     }
     if (!active) return undefined;
-    if (!turn.playerInput) turn.playerInput = String(event.prompt ?? "");
+    if (!turn.playerInput) {
+      turn.playerInput = String(event.prompt ?? "");
+      turn.catalogRequest = isRoomCatalogRequest(turn.playerInput);
+    }
     return {
       message: {
         customType: "trpg-gm-guard",
@@ -654,7 +666,7 @@ export default function trpgGmGuard(pi) {
   pi.registerTool({
     name: "trpg_gm_cli",
     label: "TRPG GM CLI",
-    description: "Run the persistent TRPG CLI with structured arguments. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"character\",\"availability\",ROOM,CHARACTER,\"--can-act\",\"true|false\",\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/list/upsert/resolve subcommand. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes participation and story-progress clocks plus immutable guardrails; matching guardrail terms force rejection, which cannot be replaced by another ruling in the same turn. Use story objective/progress/intervene commands; three stalled actions require a persisted intervention before another action.",
+    description: "Run the persistent TRPG CLI with structured arguments. Use typed trpg_gm_rooms_list rather than raw CLI for room catalog queries. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"character\",\"availability\",ROOM,CHARACTER,\"--can-act\",\"true|false\",\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/upsert/resolve subcommand; the only global list operation is typed trpg_gm_rooms_list. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes participation and story-progress clocks plus immutable guardrails; matching guardrail terms force rejection, which cannot be replaced by another ruling in the same turn. Use story objective/progress/intervene commands; three stalled actions require a persisted intervention before another action.",
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
@@ -681,15 +693,41 @@ export default function trpgGmGuard(pi) {
     },
   });
 
-  const dbRoomProperties = {
-    db: { type: "string", description: "Room database path" },
-    room: { type: "string", description: "Exact room id" },
-  };
   const registerTypedTool = (definition) => pi.registerTool({
     ...definition,
     executionMode: "sequential",
   });
 
+  registerTypedTool({
+    name: "trpg_gm_rooms_list",
+    label: "TRPG Active Rooms",
+    description: "List player-safe metadata for all active TRPG games beneath a search root. This out-of-game catalog query does not require an exact room context and never migrates room databases.",
+    parameters: {
+      type: "object", additionalProperties: false, required: ["root"],
+      properties: {
+        root: { type: "string", description: "Directory to search recursively for .trpg/rooms directories" },
+      },
+    },
+    async execute(_id, params, signal) {
+      if (active && !turn.catalogRequest) {
+        throw new Error("The active-games catalog may only be used for an explicit room-list request, never to bypass gameplay context or finalization.");
+      }
+      const result = await pi.exec(CLI_WRAPPER, ["rooms", "list", params.root], { signal });
+      if (result.code !== 0) {
+        throw new Error(result.stderr || result.stdout || `trpg-gm exited with code ${result.code}`);
+      }
+      turn.catalogQueried = true;
+      return {
+        content: [{ type: "text", text: result.stdout || '{"rooms":[]}' }],
+        details: { root: params.root, catalog: true },
+      };
+    },
+  });
+
+  const dbRoomProperties = {
+    db: { type: "string", description: "Room database path" },
+    room: { type: "string", description: "Exact room id" },
+  };
   registerTypedTool({
     name: "trpg_gm_context",
     label: "TRPG Context",
@@ -1128,6 +1166,7 @@ export default function trpgGmGuard(pi) {
       turn = freshTurn();
       turn.playerInput = playerInput;
       turn.setupMode = /(?:開新團|建立新團|new campaign|campaign setup)/iu.test(playerInput);
+      turn.catalogRequest = isRoomCatalogRequest(playerInput);
       return undefined;
     }
     if (event.message.role !== "assistant") return undefined;
@@ -1137,6 +1176,10 @@ export default function trpgGmGuard(pi) {
       : [{ type: "text", text: String(event.message.content ?? "") }];
     const hasToolCall = originalContent.some((part) =>
       ["toolCall", "tool_call"].includes(part.type));
+    if (turn.catalogRequest && turn.catalogQueried && turn.operationIndex === 0 && !hasToolCall) {
+      turn.playerFacingNarrativeValidated = true;
+      return undefined;
+    }
     if (!turn.finalized) {
       if (hasToolCall) return undefined;
       return suppressPlayerFacingErrorAndRetry(
@@ -1220,7 +1263,8 @@ export default function trpgGmGuard(pi) {
   });
 
   pi.on("agent_settled", async () => {
-    if (!active || turn.finalized || turn.reminderSent) return;
+    if (!active || turn.finalized || turn.reminderSent
+        || (turn.catalogRequest && turn.catalogQueried && turn.operationIndex === 0)) return;
     const missing = [];
     if (!turn.contextLoaded) missing.push("load the exact room with trpg-gm context, or use turnKind=clarification if required room/setup input is still missing");
     missing.push("call trpg_turn_finalize before ending the TRPG turn");

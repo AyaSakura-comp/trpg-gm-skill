@@ -7,7 +7,17 @@ GM=./scripts/trpg-gm
 DB=/path/to/workspace/.trpg/rooms/my-room.sqlite3
 ```
 
-## Room and context
+## Active room catalog, room creation, and context
+
+List every active TRPG game stored beneath standard `.trpg/rooms/` directories in a workspace tree:
+
+```bash
+$GM rooms list /absolute/workspace/root
+```
+
+The result contains only player-safe catalog metadata: search root, room id, rules system, active status, character count, latest event/recap timestamp, and canonical DB path. It recursively discovers `.trpg/rooms/` directories, ignores unrelated or malformed files, filters `rooms.status = 'active'`, opens databases read-only without migrations, and never returns script paths, canon, entities, or secrets. In Pi, prefer typed `trpg_gm_rooms_list` with `root`; this out-of-game query is the only operation that does not require selecting and loading one exact room first.
+
+Create or load one exact room normally:
 
 ```bash
 $GM --db "$DB" room create my-room --system coc7 --script /abs/path/scenario.md --seed 42

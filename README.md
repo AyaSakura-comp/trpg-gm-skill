@@ -103,13 +103,23 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 使用 `/skill:trpg-gm` 後，每個遊戲回合都會看到 `TRPG GM Guard` checklist；agent 也會取得 typed gameplay tools、raw fallback `trpg_gm_cli` 與 `trpg_turn_finalize`。Extension 會：
 
 1. 在 `before_agent_start` 注入當回合檢查表。
-2. 優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
+2. 以 `trpg_gm_rooms_list` 安全列出 workspace 內目前 active 的遊戲；gameplay 則優先以 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 的命名欄位執行 gameplay；只有未涵蓋的 setup/query 才使用 raw `trpg_gm_cli`。所有工具共用同一套 exact-room、裁定、check 與 mutation tracking，Pi 遊戲回合不解析任意 bash 字串。
 3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；DB guardrail 命中時會把錯誤的 `accepted` 強制改成 `rejected`。被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
 4. 角色生成後，要求 GM 先根據已保存的角色背景／概念設定具體開場 chapter/objective，呈現玩家可感知的故事背景並交還第一個行動選擇；完成前拒絕玩家 action 與 finalization。
 5. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密、玩家自主權及詳細敘事品質的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
 6. 在 `message_end` 發現未 finalization、敘事過短或 rejected action 被寫成已完成時，隱藏不合格回覆，將 machine-readable error code 以 `display:false` follow-up 回傳 agent並立即觸發自我修正；最多重試三次，`agent_settled` 則保留為未完成回合的 fallback。
 
 Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Python CLI 寫入 SQLite。
+
+### 列出目前正在遊玩的房間
+
+使用 typed `trpg_gm_rooms_list` 並傳入 workspace `root`，即可遞迴尋找標準 `.trpg/rooms/` 目錄中的 active 遊戲。這是 read-only、player-safe 的全域 catalog 查詢，不需要先指定 room 或載入 context；輸出包含 room id、規則系統、角色數、最近活動時間與 canonical DB path，不包含劇本路徑、canon、entities 或 GM secrets。非 TRPG 檔案會被忽略，資料庫不會因列清單而執行 migration。
+
+CLI 等價指令：
+
+```bash
+$GM rooms list /absolute/workspace/root
+```
 
 ### GM 負責詳細講述故事
 
@@ -396,7 +406,7 @@ Extension 使用 Pi lifecycle API：
 
 - `input`：辨識明確的 `/skill:trpg-gm`、要求 agent 當 GM／主持冒險，以及 TRPG 開團／續團遊戲請求，啟用 session guard；只討論或修改 `trpg-gm` 程式碼與 README 不會啟用。
 - `before_agent_start`：每回合注入 context、狀態保存、秘密資訊及玩家自主權 checklist。
-- Typed gameplay tools：`trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 使用命名欄位與 JSON object，避免模型漏掉 `adjudicate`、room、entity name、傳入非法 decision 或組出壞 JSON。
+- Typed tools：`trpg_gm_rooms_list` 提供不需 exact-room context 的 active-game catalog；`trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 使用命名欄位與 JSON object，避免模型漏掉 `adjudicate`、room、entity name、傳入非法 decision 或組出壞 JSON。
 - Raw `trpg_gm_cli` fallback：只供 typed tools 尚未涵蓋的 setup/query；以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens。所有工具都在成功後才記錄 exact room、context、玩家行動裁定、check 與 mutation；失敗不更新 guard 狀態。
 - `message_end`：每個新的 user message 都重設 turn-local adjudication／finalization 狀態，避免 Piweb／RPC 未觸發 `input` hook 時沿用上一回合；不合格的 assistant 回覆會被替換成空內容，並以隱藏的 `TRPG_TURN_NOT_FINALIZED`、`TRPG_ACTION_NARRATIVE_TOO_TERSE` 或 `TRPG_REJECTED_ACTION_REPLAYED` follow-up 回傳 agent，立即觸發同回合自我修正，而不是把內部 Guard 訊息顯示給玩家；連續三次仍未修正時停止自動循環，並以不含內部代碼的玩家安全文字說明鎖住原因：尚未完成狀態確認與保存、缺少完整場景敘事，或仍可能把 rejected action 誤寫成已發生；同時提供對應的可執行建議，例如原樣重送以重新載入／保存、維持角色意圖重送以補齊敘事，或先調查障礙、尋找已存在的工具／其他路徑來建立前置條件。
 - `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，作為 fallback 排入一次 follow-up。
@@ -426,6 +436,7 @@ Python 程式位於 `src/trpg_gm/`。它不創作故事，也不自行決定 NPC
 
 提供 agent 可呼叫的命令列介面：
 
+- 在 workspace tree 下列出所有 active room
 - 建立 room
 - 設定劇本相容的捏角規則與技能數量
 - 保存角色外觀、背景、概念及技能提案的接受／拒絕裁定
@@ -439,6 +450,10 @@ Python 程式位於 `src/trpg_gm/`。它不創作故事，也不自行決定 NPC
 - 保存與讀取最新的玩家安全 recap
 
 所有結果都輸出 JSON，方便 agent 重新讀取。
+
+### `catalog.py`
+
+以 read-only 方式搜尋 workspace tree 中的標準 `.trpg/rooms/` 目錄，辨識有效 TRPG DB，篩選 `status=active`，並只回傳 player-safe metadata。它不會建立、遷移或修改 room，也不會輸出 script path、canon、entities 或 recap 內容。
 
 ### `store.py`
 
@@ -973,10 +988,12 @@ trpg-gm-skill/
 ├── extensions/
 │   └── trpg-gm-guard.js
 ├── src/trpg_gm/
+│   ├── catalog.py
 │   ├── cli.py
 │   ├── rules.py
 │   └── store.py
 ├── tests/
+│   ├── test_catalog.py
 │   ├── test_extension.mjs
 │   └── test_*.py
 ├── docs/

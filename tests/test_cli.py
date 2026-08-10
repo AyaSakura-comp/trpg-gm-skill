@@ -10,6 +10,60 @@ from trpg_gm.cli import main
 
 
 class CliTests(unittest.TestCase):
+    def test_rooms_list_discovers_active_trpg_databases_under_standard_room_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alpha_db = root / "workspace-a" / ".trpg" / "rooms" / "alpha"
+            beta_db = root / "workspace-b" / ".trpg" / "rooms" / "beta"
+            junk = root / "workspace-b" / ".trpg" / "rooms" / "notes.txt"
+            with redirect_stdout(StringIO()):
+                main(["--db", str(alpha_db), "room", "create", "alpha", "--system", "coc7"])
+                main(["--db", str(beta_db), "room", "create", "beta", "--system", "fate"])
+                main([
+                    "--db", str(alpha_db), "character", "add", "alpha", "alice", "艾莉絲",
+                    "--hp", "10", "--mp", "8", "--san", "55",
+                ])
+            junk.write_text("not a TRPG room", encoding="utf-8")
+
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["rooms", "list", str(root)]), 0)
+
+            catalog = json.loads(output.getvalue())
+            self.assertEqual(catalog["root"], str(root.resolve()))
+            self.assertTrue(catalog["active_only"])
+            self.assertEqual([room["room_id"] for room in catalog["rooms"]], ["alpha", "beta"])
+            self.assertEqual(catalog["rooms"][0]["character_count"], 1)
+            self.assertEqual(catalog["rooms"][1]["system"], "fate")
+            self.assertEqual(catalog["rooms"][0]["db"], str(alpha_db.resolve()))
+            self.assertNotIn("script_path", catalog["rooms"][0])
+
+    def test_rooms_list_does_not_follow_a_room_directory_symlink_outside_root(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            outside_db = Path(outside) / ".trpg" / "rooms" / "external"
+            with redirect_stdout(StringIO()):
+                main(["--db", str(outside_db), "room", "create", "external"])
+            linked_parent = root / "workspace" / ".trpg"
+            linked_parent.mkdir(parents=True)
+            (linked_parent / "rooms").symlink_to(outside_db.parent, target_is_directory=True)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["rooms", "list", str(root)]), 0)
+
+            self.assertEqual(json.loads(output.getvalue())["rooms"], [])
+
+    def test_rooms_list_rejects_a_missing_or_non_directory_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "room search root must be an existing directory"):
+                main(["rooms", "list", str(root / "missing")])
+            file_root = root / "file"
+            file_root.write_text("x", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "room search root must be an existing directory"):
+                main(["rooms", "list", str(file_root)])
+
     def test_room_create_and_context_emit_json(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "game.sqlite3")

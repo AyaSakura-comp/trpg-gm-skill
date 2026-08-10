@@ -19,13 +19,14 @@ cd <directory-containing-this-SKILL.md>
 
 預設建議每個遊戲 room 使用獨立資料庫：`<workspace>/.trpg/rooms/<room-id>.sqlite3`。`room-id` 必須取自目前 Discord channel/thread、web room 或使用者明確指定的名稱；不確定時先問，絕不能猜到別的 room。
 
-完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。Pi 環境若提供 typed gameplay tools，必須優先使用 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set` 與 `trpg_gm_recap_save`；它們直接接收命名欄位與 JSON object，可避免漏掉 subcommand、room、name 或產生壞 JSON。只有 typed tools 尚未涵蓋的 setup／查詢操作才使用 `trpg_gm_cli`。所有 Pi TRPG 狀態操作都不得使用 bash wrapper。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
+完整命令見 [CLI reference](references/CLI.md)。主持原則見 [GM protocol](references/GM_PROTOCOL.md)。Pi 環境若提供 typed tools，列出 active 遊戲時使用 `trpg_gm_rooms_list`；gameplay 必須優先使用 `trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set` 與 `trpg_gm_recap_save`；它們直接接收命名欄位與 JSON object，可避免漏掉 subcommand、room、name 或產生壞 JSON。只有 typed tools 尚未涵蓋的 setup／查詢操作才使用 `trpg_gm_cli`。所有 Pi TRPG 狀態操作都不得使用 bash wrapper。其他 agent 才使用上方 `scripts/trpg-gm` wrapper。
 
 ### Pi 結構化工具速查
 
-Typed gameplay tools 的正確用法：
+Typed tools 的正確用法：
 
 ```text
+trpg_gm_rooms_list        {root} # player-safe active-game catalog; no room context required
 trpg_gm_context           {db, room, events?}
 trpg_gm_action_adjudicate {db, room, character, action, decision, basis, reason}
 trpg_gm_check             {db, room, character, stat, roll?}
@@ -120,6 +121,10 @@ TRPG 行動是虛構世界中的宣告。不得把現代法律、當代風俗習
 公平指「平等獲得有意義的選擇、發言與行動機會」，不是強迫所有玩家採取相同行動，也不是阻止主動玩家回應眼前危機。GM 應在場景轉換、調查分工、戰鬥輪替及 NPC 對話時主動把下一個決策點交給較少參與的可行動玩家。不得把安靜、失敗或技能較低當成跳過玩家的理由。
 
 若角色因昏迷、束縛、石化、離場或其他已確立狀態而無法行動，使用 `trpg_gm_character_availability`（或 raw `character availability`）保存原因。SQLite 核心會將該角色自公平候選名單排除，並強制拒絕其不可能執行的行動；狀態解除時保存 `canAct=true`。不得只為讓統計看似平均而虛構不能行動狀態。
+
+## 列出目前遊戲
+
+當使用者詢問「有哪些 TRPG room／目前正在玩的遊戲」時，使用 typed `trpg_gm_rooms_list`，把要搜尋的 workspace root 傳入 `root`。這是 player-safe、read-only 的全域 catalog 查詢，不是 gameplay action，也不需要先猜一個 room 或載入 `trpg_gm_context`。結果只列出標準 `.trpg/rooms/` 目錄下 `status=active` 的遊戲及 room id、規則系統、角色數、最近活動時間與 DB 路徑；不得為了列清單改用 bash、`find` 或直接查 SQLite。若使用者沒有指定 root，使用 agent 目前 workspace root；只有 workspace 本身不明確時才詢問。
 
 ## 開團流程
 

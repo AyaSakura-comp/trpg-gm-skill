@@ -1,6 +1,6 @@
 {
   "name": "trpg-gm-skill",
-  "version": "0.13.3",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "description": "Persistent TRPG GM skill, SQLite CLI, and Pi turn-guard extension",

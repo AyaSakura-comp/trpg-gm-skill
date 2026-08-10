@@ -84,6 +84,54 @@ const runCli = async (pi, args, db = "/tmp/game.sqlite3") => {
   }
 };
 
+test("typed room catalog tool lists active games beneath a search root without gameplay finalization", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const tool = pi.tools.get("trpg_gm_rooms_list");
+  assert.ok(tool);
+  assert.deepEqual(tool.parameters.required, ["root"]);
+  pi.execResult = {
+    code: 0,
+    stdout: JSON.stringify({ root: "/games", active_only: true, rooms: [] }),
+    stderr: "",
+    killed: false,
+  };
+
+  const result = await tool.execute("catalog", { root: "/games" });
+
+  assert.deepEqual(pi.execCalls[0].args, ["rooms", "list", "/games"]);
+  assert.match(result.content[0].text, /"active_only":true/);
+  const inactiveInjection = await pi.handlers.get("before_agent_start")(
+    { prompt: "謝謝", source: "interactive" },
+    context(),
+  );
+  assert.equal(inactiveInjection, undefined);
+
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 列出所有遊戲", source: "interactive" },
+    ctx,
+  );
+  await tool.execute("catalog-active", { root: "/games" });
+  const transformed = await pi.handlers.get("message_end")({
+    message: { role: "assistant", content: [{ type: "text", text: "目前沒有 active 遊戲。" }] },
+  }, ctx);
+  assert.equal(transformed, undefined);
+  await pi.handlers.get("agent_settled")({}, ctx);
+  assert.equal(pi.messages.length, 0);
+
+  const gameplayPi = createFakePi();
+  trpgGuard(gameplayPi);
+  await gameplayPi.handlers.get("input")(
+    { text: "/skill:trpg-gm 我調查門縫", source: "interactive" },
+    context(),
+  );
+  await assert.rejects(
+    () => gameplayPi.tools.get("trpg_gm_rooms_list").execute("catalog-bypass", { root: "/games" }),
+    /only be used for an explicit room-list request/,
+  );
+});
+
 const runAction = async (pi, {
   roomId = "room-a",
   characterId = "pc",

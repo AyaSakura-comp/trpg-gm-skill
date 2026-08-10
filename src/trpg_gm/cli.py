@@ -6,6 +6,7 @@ import random
 from pathlib import Path
 from typing import Sequence
 
+from .catalog import list_active_rooms
 from .store import GameStore
 
 
@@ -36,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trpg-gm", description="Persistent TRPG GM state CLI")
     parser.add_argument("--db", type=Path, default=Path(".trpg/game.sqlite3"))
     commands = parser.add_subparsers(dest="command", required=True)
+
+    rooms = commands.add_parser("rooms")
+    rooms_commands = rooms.add_subparsers(dest="action", required=True)
+    rooms_list = rooms_commands.add_parser("list")
+    rooms_list.add_argument("root", type=Path)
 
     room = commands.add_parser("room")
     room_commands = room.add_subparsers(dest="action", required=True)
@@ -171,6 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "rooms" and args.action == "list":
+        result = list_active_rooms(args.root)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
     store = GameStore(args.db)
 
     if args.command == "room":
