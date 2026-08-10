@@ -27,7 +27,7 @@ Verify the most failure-prone v0.13.0 path through production-like Pi and `local
 
 ## Mechanical output guard
 
-After action finalization, `message_end` removes handoff questions and Markdown list lines, then requires at least one prose paragraph containing 60 meaningful characters and two sentence-ending marks. A terse response is replaced with a guard error, `turn.finalized` is invalidated, and the agent is asked to correct the response. For rejected actions, a normalized literal replay of the exact rejected action in the model's prose is also blocked; the Extension appends the exact audit wording itself after prose validation.
+After action finalization, `message_end` removes handoff questions and Markdown list lines, then requires at least one prose paragraph containing 60 meaningful characters and two sentence-ending marks. For rejected actions, a normalized literal replay of the exact rejected action in the model's prose is also blocked; the Extension appends the exact audit wording itself after prose validation. In the original v0.13.0 behavior, a terse response was replaced with a player-visible Guard error. v0.13.1 supersedes that UX: the invalid response is replaced with empty content and a machine-readable `display:false` follow-up triggers agent self-correction. See [`QWEN_HIDDEN_GUARD_RETRY_E2E.md`](QWEN_HIDDEN_GUARD_RETRY_E2E.md).
 
 This is bounded validation, not a semantic literary classifier. Paraphrased low-quality prose, subtle player-agency violations, or a semantic claim that a rejected action occurred can still require protocol compliance, E2E review, or future semantic validation.
 

@@ -880,8 +880,92 @@ test("unfinalized text-only player responses are blocked", async () => {
   });
 
   const text = transformed.message.content.map((part) => part.text ?? "").join("");
-  assert.match(text, /blocked|尚未完成|未完成/iu);
-  assert.doesNotMatch(text, /門已經打開了/);
+  assert.equal(text, "", "invalid player-facing text must be suppressed instead of exposing a guard message");
+  assert.equal(pi.messages.length, 1);
+  assert.equal(pi.messages[0].message.display, false);
+  assert.equal(pi.messages[0].message.details.code, "TRPG_TURN_NOT_FINALIZED");
+  assert.match(pi.messages[0].message.content, /TRPG_TURN_NOT_FINALIZED/);
+  assert.equal(pi.messages[0].options.deliverAs, "followUp");
+  assert.equal(pi.messages[0].options.triggerTurn, true);
+});
+
+test("hidden correction retries stop after three attempts without exposing internal codes", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  let transformed;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    transformed = await pi.handlers.get("message_end")({
+      message: { role: "assistant", content: [{ type: "text", text: "尚未完成的回答" }] },
+    }, ctx);
+    const text = transformed.message.content.map((part) => part.text ?? "").join("");
+    if (attempt <= 3) assert.equal(text, "");
+  }
+  assert.equal(pi.messages.length, 3);
+  const fallback = transformed.message.content.map((part) => part.text ?? "").join("");
+  assert.match(fallback, /無法自動完成/);
+  assert.doesNotMatch(fallback, /TRPG_|Guard|finalized/iu);
+});
+
+test("expanded skill instructions cannot become player action text on user message reset", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲", source: "interactive" },
+    ctx,
+  );
+  await pi.handlers.get("message_end")({
+    message: {
+      role: "user",
+      content: [{
+        type: "text",
+        text: "<skill name=\"trpg-gm\">範例玩家行動：讀取密室；也可開新團。</skill>\n這是 Extension 技術問題。",
+      }],
+    },
+  }, ctx);
+  await runCli(pi, ["context", "room-a"]);
+  await assert.rejects(
+    () => runAction(pi, { action: "讀取密室", decision: "accepted" }),
+    /exact contiguous player wording/iu,
+  );
+});
+
+test("a new user message resets stale adjudication state even when the input hook is skipped", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  const ctx = context();
+  await pi.handlers.get("input")(
+    { text: "/skill:trpg-gm 繼續遊戲；調查門縫", source: "interactive" },
+    ctx,
+  );
+  await runCli(pi, ["context", "room-a"]);
+  await runAction(pi, { action: "調查門縫", decision: "rejected" });
+  await pi.tools.get("trpg_turn_finalize").execute("finalize-gameplay", {
+    turnKind: "gameplay", roomId: "room-a", playerActionStatus: "rejected",
+    stateChanges: [], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
+  });
+
+  await pi.handlers.get("message_end")({
+    message: { role: "user", content: [{ type: "text", text: "這個 Guard bug 要怎麼解決？" }] },
+  }, ctx);
+  const result = await pi.tools.get("trpg_turn_finalize").execute("finalize-meta", {
+    turnKind: "clarification", roomId: "", playerActionStatus: "not_applicable",
+    noPlayerActionReason: "使用者詢問 Extension 技術問題，沒有遊戲內行動",
+    noStateChangeReason: "沒有提供 gameplay room，也沒有遊戲狀態變更",
+    stateChanges: [], secretsChecked: true, playerAgencyChecked: true, narrativeDetailChecked: true,
+  });
+  assert.match(result.content[0].text, /clarification/iu);
+
+  const transformed = await pi.handlers.get("message_end")({
+    message: { role: "assistant", content: [{ type: "text", text: "這是 Extension 狀態管理問題。" }] },
+  }, ctx);
+  assert.equal(transformed, undefined);
+  assert.equal(pi.messages.length, 0);
 });
 
 test("finalizer rejects a turn without context or persisted state accounting", async () => {
@@ -1502,8 +1586,11 @@ test("terse ruling-and-handoff text is blocked after accepted or rejected action
       },
     }, ctx);
     const text = transformed.message.content.map((part) => part.text ?? "").join("");
-    assert.match(text, /blocked|小說|novel-like|敘事/iu);
-    assert.doesNotMatch(text, new RegExp(`pc 的行動 ${decision}`));
+    assert.equal(text, "");
+    assert.equal(pi.messages.length, 1);
+    assert.equal(pi.messages[0].message.display, false);
+    assert.equal(pi.messages[0].message.details.code, "TRPG_ACTION_NARRATIVE_TOO_TERSE");
+    assert.match(pi.messages[0].message.content, /TRPG_ACTION_NARRATIVE_TOO_TERSE/);
   }
 });
 
@@ -1534,8 +1621,11 @@ test("rejected action text cannot be replayed as completed inside rich narration
     },
   }, ctx);
   const text = transformed.message.content.map((part) => part.text ?? "").join("");
-  assert.match(text, /blocked|rejected action|拒絕/iu);
-  assert.doesNotMatch(text, /來到另一側冰冷的密室/);
+  assert.equal(text, "");
+  assert.equal(pi.messages.length, 1);
+  assert.equal(pi.messages[0].message.display, false);
+  assert.equal(pi.messages[0].message.details.code, "TRPG_REJECTED_ACTION_REPLAYED");
+  assert.match(pi.messages[0].message.content, /TRPG_REJECTED_ACTION_REPLAYED/);
 });
 
 test("a check cannot execute before an accepted action", async () => {

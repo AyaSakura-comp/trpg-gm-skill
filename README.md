@@ -107,7 +107,7 @@ pi -e "$REPO" -p '/skill:trpg-gm 我想玩 TRPG'
 3. 要求每項玩家遊戲內行動先保存接受／拒絕裁定、設定依據與原因；DB guardrail 命中時會把錯誤的 `accepted` 強制改成 `rejected`。被拒絕的行動不能擲骰或改變世界狀態，拒絕理由會自動附加到玩家回覆。
 4. 角色生成後，要求 GM 先根據已保存的角色背景／概念設定具體開場 chapter/objective，呈現玩家可感知的故事背景並交還第一個行動選擇；完成前拒絕玩家 action 與 finalization。
 5. 拒絕 gameplay 回合沒有先讀取 context、沒有交代行動裁定／檢定後果，或未確認秘密、玩家自主權及詳細敘事品質的 finalization；尚未取得 room／開團資訊時可使用受限的 `clarification` 回合。
-6. 在 `agent_settled`（包含 retry／compaction 完成後）發現未完成時，最多自動送出一次 follow-up，要求 agent 補寫狀態並重新完成回合。
+6. 在 `message_end` 發現未 finalization、敘事過短或 rejected action 被寫成已完成時，隱藏不合格回覆，將 machine-readable error code 以 `display:false` follow-up 回傳 agent並立即觸發自我修正；最多重試三次，`agent_settled` 則保留為未完成回合的 fallback。
 
 Extension 不會猜測或自動寫入故事內容；實際狀態仍只能由 Python CLI 寫入 SQLite。
 
@@ -398,7 +398,8 @@ Extension 使用 Pi lifecycle API：
 - `before_agent_start`：每回合注入 context、狀態保存、秘密資訊及玩家自主權 checklist。
 - Typed gameplay tools：`trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 使用命名欄位與 JSON object，避免模型漏掉 `adjudicate`、room、entity name、傳入非法 decision 或組出壞 JSON。
 - Raw `trpg_gm_cli` fallback：只供 typed tools 尚未涵蓋的 setup/query；以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens。所有工具都在成功後才記錄 exact room、context、玩家行動裁定、check 與 mutation；失敗不更新 guard 狀態。
-- `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，排入一次 follow-up，讓 agent 補完而不是無限重試。
+- `message_end`：每個新的 user message 都重設 turn-local adjudication／finalization 狀態，避免 Piweb／RPC 未觸發 `input` hook 時沿用上一回合；不合格的 assistant 回覆會被替換成空內容，並以隱藏的 `TRPG_TURN_NOT_FINALIZED`、`TRPG_ACTION_NARRATIVE_TOO_TERSE` 或 `TRPG_REJECTED_ACTION_REPLAYED` follow-up 回傳 agent，立即觸發同回合自我修正，而不是把內部 Guard 訊息顯示給玩家；連續三次仍未修正時停止自動循環，只顯示不含內部代碼的重試提示。
+- `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，作為 fallback 排入一次 follow-up。
 - Session custom entry：保存 guard 已啟用狀態，使 `/reload` 或 resume 後仍可恢復。
 
 Extension 另提供 `trpg_turn_finalize` 工具。Agent 必須在所有狀態操作完成後、玩家可見回答之前呼叫；工具會拒絕以下情況：
@@ -415,7 +416,7 @@ Extension 另提供 `trpg_turn_finalize` 工具。Agent 必須在所有狀態操
 
 `trpg_turn_finalize` 的 `turnKind` 通常使用 `gameplay`。若 Skill 正在詢問「新團或舊團」、room-id、劇本或角色等缺少資訊，可使用 `clarification`，並在 `noStateChangeReason` 說明正在等待哪一項玩家輸入；已經擲骰或寫入狀態的回合不能藉此跳過驗證。
 
-這是一個流程 guard，不是安全邊界或完整的故事內容審查器。`narrativeDetailChecked` 仍是模型在輸出前的強制自我確認；此外，v0.13 起 `message_end` 對每個已裁定 action 執行 bounded prose validation：移除交棒問句與 Markdown 清單後，至少要有一段 60 個 meaningful characters、兩個句末標點的敘事，否則阻擋回覆並要求修正。Rejected action 的最終文字若逐字重播其正規化 action 原句也會被阻擋，以免把未發生的嘗試寫成既成事實。這些長度、句子及 literal-match 檢查不能直接量測真正文學性，也不能識別所有語意改寫、秘密洩漏或漏存線索；`agent_settled` 發生在模型產生回覆之後，follow-up 可以要求修正，但不能撤回已經串流到前端的文字。秘密資訊、敘事品質與持久化完整性仍須由 Skill 規範、結構化 finalization、SQLite 事件紀錄、production-like E2E 及人工監督共同防護。
+這是一個流程 guard，不是安全邊界或完整的故事內容審查器。`narrativeDetailChecked` 仍是模型在輸出前的強制自我確認；此外，v0.13 起 `message_end` 對每個已裁定 action 執行 bounded prose validation：移除交棒問句與 Markdown 清單後，至少要有一段 60 個 meaningful characters、兩個句末標點的敘事。Rejected action 的最終文字若逐字重播其正規化 action 原句也會被阻擋，以免把未發生的嘗試寫成既成事實。v0.13.1 起，這些錯誤不再以玩家可見的 Guard 文字取代答案，而是隱藏不合格回覆並以 machine-readable、`display:false` follow-up 促使 agent 自我修正。這些長度、句子及 literal-match 檢查不能直接量測真正文學性，也不能識別所有語意改寫、秘密洩漏或漏存線索；`message_end` 只能替換 finalized message，若某個前端直接呈現 token streaming，仍可能在驗證前短暫看到模型原始文字。秘密資訊、敘事品質與持久化完整性仍須由 Skill 規範、結構化 finalization、SQLite 事件紀錄、production-like E2E 及人工監督共同防護。
 
 ## Python 負責什麼
 
@@ -950,7 +951,7 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 - Session 收尾保存 player-safe recap；舊團入口顯示 recap，而不是完整私密 context。
 - 沒有 hidden-information leak、玩家代理行為或靜默 canon rewrite。
 
-本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事、[`QWEN_EVERY_ACTION_NARRATIVE_E2E.md`](docs/QWEN_EVERY_ACTION_NARRATIVE_E2E.md) 的每次 accepted／rejected 行動小說回覆 hook、[`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場，以及 [`QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md`](docs/QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md) 的時代背景優先犯罪行動裁定。
+本專案實際 Luna playtest 的流程、結果、發現問題與修正紀錄見 [`docs/LUNA_PLAYTEST.md`](docs/LUNA_PLAYTEST.md)。Production Qwen MTP 證據包含：[`QWEN_MTP_GUARDRAIL_PLAYTEST.md`](docs/QWEN_MTP_GUARDRAIL_PLAYTEST.md) 的禁止條款／元敘事攻擊／秘密保護、[`QWEN_OPENING_GUIDANCE_E2E.md`](docs/QWEN_OPENING_GUIDANCE_E2E.md) 的背景導向開場、[`QWEN_NARRATIVE_DETAIL_E2E.md`](docs/QWEN_NARRATIVE_DETAIL_E2E.md) 的小說式敘事、[`QWEN_EVERY_ACTION_NARRATIVE_E2E.md`](docs/QWEN_EVERY_ACTION_NARRATIVE_E2E.md) 的每次 accepted／rejected 行動小說回覆 hook、[`QWEN_HIDDEN_GUARD_RETRY_E2E.md`](docs/QWEN_HIDDEN_GUARD_RETRY_E2E.md) 的隱藏 error code 與 agent 自我修正、[`QWEN_EVENT_DRIVEN_TRANSITION_E2E.md`](docs/QWEN_EVENT_DRIVEN_TRANSITION_E2E.md) 的事件驅動強制轉場，以及 [`QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md`](docs/QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md) 的時代背景優先犯罪行動裁定。
 
 ## 目前邊界
 
@@ -984,6 +985,7 @@ trpg-gm-skill/
 │   ├── QWEN_ERA_GROUNDED_ADJUDICATION_E2E.md
 │   ├── QWEN_EVERY_ACTION_NARRATIVE_E2E.md
 │   ├── QWEN_EVENT_DRIVEN_TRANSITION_E2E.md
+│   ├── QWEN_HIDDEN_GUARD_RETRY_E2E.md
 │   ├── QWEN_MTP_GUARDRAIL_PLAYTEST.md
 │   ├── QWEN_NARRATIVE_DETAIL_E2E.md
 │   └── QWEN_OPENING_GUIDANCE_E2E.md

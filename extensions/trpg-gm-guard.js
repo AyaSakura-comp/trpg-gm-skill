@@ -56,6 +56,12 @@ function hasNovelLikeActionPassage(text) {
   });
 }
 
+function stripExpandedSkillBlocks(text) {
+  return String(text ?? "")
+    .replace(/<skill\b[^>]*>[\s\S]*?<\/skill>/giu, "")
+    .trim();
+}
+
 function repeatsRejectedActionLiteral(text, action) {
   const normalize = (value) => String(value ?? "")
     .normalize("NFKC")
@@ -341,6 +347,7 @@ function freshTurn() {
     mutationPersisted: false,
     finalized: false,
     playerFacingNarrativeValidated: false,
+    correctionAttempts: 0,
     reminderSent: false,
   };
 }
@@ -1055,8 +1062,55 @@ export default function trpgGmGuard(pi) {
     },
   });
 
+  function suppressPlayerFacingErrorAndRetry(event, code, instruction) {
+    turn.finalized = false;
+    turn.playerFacingNarrativeValidated = false;
+    turn.reminderSent = true;
+    turn.correctionAttempts += 1;
+    if (turn.correctionAttempts > 3) {
+      return {
+        message: {
+          ...event.message,
+          content: [{
+            type: "text",
+            text: "本回合無法自動完成，請重新送出上一個行動。",
+          }],
+        },
+      };
+    }
+    pi.sendMessage(
+      {
+        customType: "trpg-gm-guard-error",
+        content: `[${code}] The previous player-facing response was suppressed and was not delivered. ${instruction} Correct the same turn now; do not explain this guard error to the player.`,
+        display: false,
+        details: { code, retryable: true },
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+    return {
+      message: {
+        ...event.message,
+        content: [],
+      },
+    };
+  }
+
   pi.on("message_end", async (event) => {
-    if (!active || event.message.role !== "assistant") return undefined;
+    if (!active) return undefined;
+    if (event.message.role === "user") {
+      const content = Array.isArray(event.message.content)
+        ? event.message.content
+        : [{ type: "text", text: String(event.message.content ?? "") }];
+      const playerInput = stripExpandedSkillBlocks(content
+        .filter((part) => part.type === "text")
+        .map((part) => String(part.text ?? ""))
+        .join("\n"));
+      turn = freshTurn();
+      turn.playerInput = playerInput;
+      turn.setupMode = /(?:開新團|建立新團|new campaign|campaign setup)/iu.test(playerInput);
+      return undefined;
+    }
+    if (event.message.role !== "assistant") return undefined;
     if (turn.playerFacingNarrativeValidated) return undefined;
     const originalContent = Array.isArray(event.message.content)
       ? event.message.content
@@ -1065,47 +1119,31 @@ export default function trpgGmGuard(pi) {
       ["toolCall", "tool_call"].includes(part.type));
     if (!turn.finalized) {
       if (hasToolCall) return undefined;
-      return {
-        message: {
-          ...event.message,
-          content: [{
-            type: "text",
-            text: "[TRPG GM Guard] Player-facing response blocked: this turn is not finalized. Load context, persist the action ruling and consequences, then call trpg_turn_finalize.",
-          }],
-        },
-      };
+      return suppressPlayerFacingErrorAndRetry(
+        event,
+        "TRPG_TURN_NOT_FINALIZED",
+        "Load the exact context, persist the action ruling and consequences, then call trpg_turn_finalize before producing any player-facing response.",
+      );
     }
     const originalText = originalContent
       .filter((part) => part.type === "text")
       .map((part) => String(part.text ?? ""))
       .join("\n");
     if (turn.actionAdjudications.length > 0 && !hasNovelLikeActionPassage(originalText)) {
-      turn.finalized = false;
-      turn.reminderSent = false;
-      return {
-        message: {
-          ...event.message,
-          content: [{
-            type: "text",
-            text: "[TRPG GM Guard] Player-facing action response blocked: add at least a short grounded novel-like passage before the ruling and handoff. For a rejected action, describe only the established obstacle or unchanged player-visible scene; do not make the rejected action occur.",
-          }],
-        },
-      };
+      return suppressPlayerFacingErrorAndRetry(
+        event,
+        "TRPG_ACTION_NARRATIVE_TOO_TERSE",
+        "Call trpg_turn_finalize again, then add a grounded novel-like passage before the ruling and handoff. For a rejected action, describe only the established obstacle or unchanged player-visible scene; do not make the rejected action occur.",
+      );
     }
     const actionForNarration = turn.actionAdjudications.at(-1);
     if (actionForNarration?.decision === "rejected"
         && repeatsRejectedActionLiteral(originalText, actionForNarration.action)) {
-      turn.finalized = false;
-      turn.reminderSent = false;
-      return {
-        message: {
-          ...event.message,
-          content: [{
-            type: "text",
-            text: "[TRPG GM Guard] Player-facing response blocked: do not replay the rejected action as completed fiction. Narrate only the established obstacle or unchanged player-visible scene; the guard will append the exact rejected ruling separately.",
-          }],
-        },
-      };
+      return suppressPlayerFacingErrorAndRetry(
+        event,
+        "TRPG_REJECTED_ACTION_REPLAYED",
+        "Call trpg_turn_finalize again, then narrate only the established obstacle or unchanged player-visible scene. Do not replay the rejected action as completed fiction; the guard appends the exact rejected ruling separately.",
+      );
     }
     turn.playerFacingNarrativeValidated = true;
     const blocks = [];
