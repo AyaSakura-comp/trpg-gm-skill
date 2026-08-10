@@ -1,5 +1,7 @@
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from trpg_gm.store import GameStore
@@ -54,24 +56,21 @@ class GameStoreTests(unittest.TestCase):
             store.create_room("room-a", "coc7")
             for character_id, name in (("alice", "艾莉絲"), ("bob", "鮑伯"), ("carol", "卡蘿")):
                 store.add_character("room-a", character_id, name, hp=10, mp=8, san=55)
-            for action in ("我檢查窗戶", "我搜索書桌"):
+            store.set_character_availability(
+                "room-a", "carol", can_act=False, reason="遭束縛，尚未脫困"
+            )
+            for character_id, action in (
+                ("alice", "我檢查窗戶"),
+                ("bob", "我聆聽門後"),
+                ("alice", "我搜索書桌"),
+            ):
                 store.adjudicate_action(
-                    "room-a", "alice", action, decision="accepted",
+                    "room-a", character_id, action, decision="accepted",
                     basis="目前場景允許調查", reason="一般調查行動可行",
                 )
                 store.record_story_progress(
                     "room-a", status="advanced", reason="完成一個新的調查方向",
                 )
-            store.adjudicate_action(
-                "room-a", "bob", "我聆聽門後", decision="accepted",
-                basis="目前場景允許調查", reason="一般調查行動可行",
-            )
-            store.record_story_progress(
-                "room-a", status="advanced", reason="取得另一個調查方向",
-            )
-            store.set_character_availability(
-                "room-a", "carol", can_act=False, reason="遭束縛，尚未脫困"
-            )
 
             participation = store.get_context("room-a")["participation"]
 
@@ -82,6 +81,79 @@ class GameStoreTests(unittest.TestCase):
             self.assertEqual(by_id["bob"]["action_count"], 1)
             self.assertFalse(by_id["carol"]["can_act"])
             self.assertEqual(by_id["carol"]["unavailable_reason"], "遭束縛，尚未脫困")
+
+    def test_action_from_non_priority_character_is_forced_rejected_without_consuming_spotlight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.add_character("room-a", "bob", "鮑伯", hp=10, mp=8, san=55)
+            store.adjudicate_action(
+                "room-a", "alice", "我檢查窗戶", decision="accepted",
+                basis="目前場景允許調查", reason="一般調查行動可行",
+            )
+            store.record_story_progress(
+                "room-a", status="advanced", reason="完成一個新的調查方向",
+            )
+
+            rejected = store.adjudicate_action(
+                "room-a", "alice", "我再搜索書桌", decision="accepted",
+                basis="目前場景允許調查", reason="一般調查行動可行",
+            )
+
+            self.assertEqual(rejected["decision"], "rejected")
+            self.assertTrue(rejected["spotlight_enforced"])
+            self.assertEqual(rejected["requested_decision"], "accepted")
+            self.assertEqual(rejected["next_spotlight_character_ids"], ["bob"])
+            participation = store.get_context("room-a")["participation"]
+            by_id = {item["character_id"]: item for item in participation["characters"]}
+            self.assertEqual(by_id["alice"]["action_count"], 1)
+            self.assertEqual(by_id["bob"]["action_count"], 0)
+            self.assertEqual(participation["next_spotlight_character_ids"], ["bob"])
+
+    def test_concurrent_actions_cannot_consume_the_same_spotlight_slot_twice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.add_character("room-a", "bob", "鮑伯", hp=10, mp=8, san=55)
+            store.adjudicate_action(
+                "room-a", "alice", "我檢查窗戶", decision="accepted",
+                basis="目前場景允許調查", reason="一般調查行動可行",
+            )
+            store.record_story_progress(
+                "room-a", status="advanced", reason="完成一個新的調查方向",
+            )
+            barrier = threading.Barrier(2)
+            original_participation = store._get_participation
+
+            def synchronize_snapshot(*args, **kwargs):
+                result = original_participation(*args, **kwargs)
+                try:
+                    barrier.wait(timeout=0.2)
+                except threading.BrokenBarrierError:
+                    pass
+                return result
+
+            store._get_participation = synchronize_snapshot
+
+            def act(index):
+                return store.adjudicate_action(
+                    "room-a", "bob", f"我調查門把 {index}", decision="accepted",
+                    basis="目前場景允許調查", reason="一般調查行動可行",
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                rulings = list(executor.map(act, range(2)))
+
+            self.assertEqual(
+                sorted(ruling["decision"] for ruling in rulings),
+                ["accepted", "rejected"],
+            )
+            participation = store.get_context("room-a")["participation"]
+            by_id = {item["character_id"]: item for item in participation["characters"]}
+            self.assertEqual(by_id["alice"]["action_count"], 1)
+            self.assertEqual(by_id["bob"]["action_count"], 1)
 
     def test_three_stalled_actions_require_a_story_intervention(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -860,6 +932,29 @@ class GameStoreTests(unittest.TestCase):
                 blocked["enforced_guardrails"], ["no-bank-robbery-at-this-table"],
             )
 
+    def test_check_requires_a_pending_accepted_action_for_the_same_character(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / ("campaign." + "sqlite" + "3"))
+            store.create_room("room-a", "coc7")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=8, san=55,
+                stats={"聆聽": 60},
+            )
+            store.add_character(
+                "room-a", "bob", "鮑伯", hp=10, mp=8, san=55,
+                stats={"聆聽": 50},
+            )
+            store.adjudicate_action(
+                "room-a", "bob", "我聆聽門後", decision="accepted",
+                basis="目前場景允許調查", reason="一般調查行動可行",
+            )
+
+            with self.assertRaisesRegex(ValueError, "accepted.*same character"):
+                store.record_check("room-a", "alice", "聆聽", roll=20)
+
+            result = store.record_check("room-a", "bob", "聆聽", roll=20)
+            self.assertEqual(result["character_id"], "bob")
+
     def test_record_check_uses_character_stat_and_logs_result(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GameStore(Path(directory) / "campaign.sqlite3")
@@ -868,6 +963,10 @@ class GameStoreTests(unittest.TestCase):
                 "room-a", "alice", "艾莉絲", hp=10, mp=8, san=55, stats={"聆聽": 60}
             )
 
+            store.adjudicate_action(
+                "room-a", "alice", "我聆聽門後", decision="accepted",
+                basis="目前場景允許調查", reason="一般調查行動可行",
+            )
             result = store.record_check("room-a", "alice", "聆聽", roll=20)
 
             self.assertEqual(result["degree"], "hard")

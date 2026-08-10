@@ -266,9 +266,11 @@ class GameStore:
         self,
         room_id: str,
         events: list[dict[str, Any]] | None = None,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
-        with self._connect() as db:
-            rows = db.execute(
+        def load_rows(db: sqlite3.Connection):
+            character_rows = db.execute(
                 """SELECT c.id, c.name, c.hp, a.can_act, a.reason
                 FROM characters AS c
                 LEFT JOIN character_availability AS a
@@ -276,13 +278,37 @@ class GameStore:
                 WHERE c.room_id = ? ORDER BY c.id""",
                 (room_id,),
             ).fetchall()
+            if events is not None:
+                return character_rows, events
+            event_rows = db.execute(
+                "SELECT id, created_at, kind, payload_json FROM events "
+                "WHERE room_id = ? ORDER BY id",
+                (room_id,),
+            ).fetchall()
+            loaded_events = [
+                {
+                    "id": row["id"],
+                    "created_at": row["created_at"],
+                    "kind": row["kind"],
+                    "payload": json.loads(row["payload_json"]),
+                }
+                for row in event_rows
+            ]
+            return character_rows, loaded_events
+
+        if connection is None:
+            with self._connect() as db:
+                rows, participation_events = load_rows(db)
+        else:
+            rows, participation_events = load_rows(connection)
         action_counts = {row["id"]: 0 for row in rows}
         accepted_counts = {row["id"]: 0 for row in rows}
         last_action_event_ids: dict[str, int | None] = {row["id"]: None for row in rows}
-        for event in events if events is not None else self.list_events(room_id):
+        for event in participation_events:
             if (
                 event["kind"] != "action_adjudicated"
                 or event["payload"].get("availability_enforced")
+                or event["payload"].get("spotlight_enforced")
                 or event["payload"].get("enforced_guardrails")
             ):
                 continue
@@ -316,13 +342,24 @@ class GameStore:
             )
         eligible = [item for item in characters if item["can_act"]]
         minimum = min((item["action_count"] for item in eligible), default=None)
+        priorities = [
+            item for item in eligible if item["action_count"] == minimum
+        ]
+        if len(priorities) > 1:
+            most_recent = max(
+                priorities,
+                key=lambda item: item["last_action_event_id"] or -1,
+            )
+            if most_recent["last_action_event_id"] is not None:
+                priorities = [
+                    item for item in priorities
+                    if item["character_id"] != most_recent["character_id"]
+                ]
         return {
             "characters": characters,
             "eligible_character_ids": [item["character_id"] for item in eligible],
             "next_spotlight_character_ids": [
-                item["character_id"]
-                for item in eligible
-                if item["action_count"] == minimum
+                item["character_id"] for item in priorities
             ],
             "action_count_gap": (
                 max(item["action_count"] for item in eligible) - minimum
@@ -1028,51 +1065,73 @@ class GameStore:
             raise ValueError("reason must explain why the action is accepted or rejected")
         if self.get_character(room_id, character_id) is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
-        story_progress = self.get_story_progress(room_id)
-        if story_progress["opening_guidance_required"]:
-            raise ValueError(
-                "guide the story background from the generated character background "
-                "before accepting another player action"
-            )
-        if story_progress["pending_action_event_id"] is not None:
-            raise ValueError(
-                "an unassessed player action must be recorded as advanced or stalled "
-                "before another action"
-            )
-        if story_progress["intervention_required"]:
-            raise ValueError(
-                "story intervention required after three stalled player actions; "
-                "introduce and persist an event that advances the chapter or objective"
-            )
         requested_decision = decision
-        participation = self._get_participation(room_id)
-        participant = next(
-            item for item in participation["characters"]
-            if item["character_id"] == character_id
-        )
-        availability_enforcement: dict[str, Any] = {}
-        if not participant["can_act"]:
-            decision = "rejected"
-            basis = "角色目前狀態不允許行動"
-            reason = participant["unavailable_reason"]
-            availability_enforcement = {
-                "requested_decision": requested_decision,
-                "availability_enforced": True,
-            }
-        matches = self._matching_guardrails(room_id, "action", action)
-        decision, basis, reason, guardrail_enforcement = self._enforce_guardrails(
-            decision, basis, reason, matches
-        )
-        enforcement = {**availability_enforcement, **guardrail_enforcement}
-        result = {
-            "character_id": character_id,
-            "action": action.strip(),
-            "decision": decision,
-            "basis": basis.strip(),
-            "reason": reason.strip(),
-            **enforcement,
-        }
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            events = self.list_events(room_id)
+            story_progress = self.get_story_progress(room_id, events)
+            if story_progress["opening_guidance_required"]:
+                raise ValueError(
+                    "guide the story background from the generated character background "
+                    "before accepting another player action"
+                )
+            if story_progress["intervention_required"]:
+                raise ValueError(
+                    "story intervention required after three stalled player actions; "
+                    "introduce and persist an event that advances the chapter or objective"
+                )
+            participation = self._get_participation(
+                room_id, events, connection=db
+            )
+            participant = next(
+                item for item in participation["characters"]
+                if item["character_id"] == character_id
+            )
+            availability_enforcement: dict[str, Any] = {}
+            if not participant["can_act"]:
+                decision = "rejected"
+                basis = "角色目前狀態不允許行動"
+                reason = participant["unavailable_reason"]
+                availability_enforcement = {
+                    "requested_decision": requested_decision,
+                    "availability_enforced": True,
+                }
+            spotlight_enforcement: dict[str, Any] = {}
+            priorities = participation["next_spotlight_character_ids"]
+            if participant["can_act"] and character_id not in priorities:
+                decision = "rejected"
+                basis = "公平 spotlight 順序尚未輪到此角色"
+                reason = f"目前應優先讓以下角色行動：{', '.join(priorities)}"
+                spotlight_enforcement = {
+                    "requested_decision": requested_decision,
+                    "spotlight_enforced": True,
+                    "next_spotlight_character_ids": priorities,
+                }
+            if (
+                story_progress["pending_action_event_id"] is not None
+                and not spotlight_enforcement
+            ):
+                raise ValueError(
+                    "an unassessed player action must be recorded as advanced or stalled "
+                    "before another action"
+                )
+            matches = self._matching_guardrails(room_id, "action", action)
+            decision, basis, reason, guardrail_enforcement = self._enforce_guardrails(
+                decision, basis, reason, matches
+            )
+            enforcement = {
+                **availability_enforcement,
+                **spotlight_enforcement,
+                **guardrail_enforcement,
+            }
+            result = {
+                "character_id": character_id,
+                "action": action.strip(),
+                "decision": decision,
+                "basis": basis.strip(),
+                "reason": reason.strip(),
+                **enforcement,
+            }
             self._append_event(db, room_id, "action_adjudicated", result)
         return result
 
@@ -1082,7 +1141,8 @@ class GameStore:
         character = self.get_character(room_id, character_id)
         if character is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
-        if self.get_story_progress(room_id)["opening_guidance_required"]:
+        story_progress = self.get_story_progress(room_id)
+        if story_progress["opening_guidance_required"]:
             raise ValueError("guide the story background before resolving a check")
         participant = next(
             item for item in self._get_participation(room_id)["characters"]
@@ -1092,6 +1152,24 @@ class GameStore:
             raise ValueError(
                 f"character cannot resolve a check while unavailable: "
                 f"{participant['unavailable_reason']}"
+            )
+        pending_action_event_id = story_progress["pending_action_event_id"]
+        pending_action = None
+        if pending_action_event_id is not None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT payload_json FROM events WHERE room_id = ? AND id = ?",
+                    (room_id, pending_action_event_id),
+                ).fetchone()
+            if row is not None:
+                pending_action = json.loads(row["payload_json"])
+        if (
+            pending_action is None
+            or pending_action.get("decision") != "accepted"
+            or pending_action.get("character_id") != character_id
+        ):
+            raise ValueError(
+                "a check requires a pending accepted action for the same character"
             )
         if stat not in character["stats"]:
             raise KeyError(f"unknown stat for {character_id}: {stat}")

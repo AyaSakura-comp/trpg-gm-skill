@@ -633,6 +633,7 @@ export default function trpgGmGuard(pi) {
       try {
         const rawAdjudication = JSON.parse(result.stdout);
         const countsAsParticipation = !rawAdjudication.availability_enforced
+          && !rawAdjudication.spotlight_enforced
           && !rawAdjudication.enforced_guardrails;
         turn.actionNeedsProgress = countsAsParticipation
           && adjudication.decision === "accepted"
