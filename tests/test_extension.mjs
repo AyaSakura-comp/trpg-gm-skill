@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import trpgGuard, { shouldActivateFromText } from "../extensions/trpg-gm-guard.js";
+import trpgGuard, {
+  playerSafeCorrectionFailure,
+  shouldActivateFromText,
+} from "../extensions/trpg-gm-guard.js";
 
 function createFakePi() {
   const handlers = new Map();
@@ -889,6 +892,22 @@ test("unfinalized text-only player responses are blocked", async () => {
   assert.equal(pi.messages[0].options.triggerTurn, true);
 });
 
+test("retry exhaustion explains each player-safe lock reason without internal codes", () => {
+  const expectations = [
+    ["TRPG_TURN_NOT_FINALIZED", /狀態確認與保存/],
+    ["TRPG_ACTION_NARRATIVE_TOO_TERSE", /完整的場景敘事/],
+    ["TRPG_REJECTED_ACTION_REPLAYED", /被拒絕的行動.*已經發生/],
+  ];
+  for (const [code, reason] of expectations) {
+    const message = playerSafeCorrectionFailure(code);
+    assert.match(message, /本回合已暫停/);
+    assert.match(message, reason);
+    assert.match(message, /沒有送出/);
+    assert.match(message, /重新送出上一個行動/);
+    assert.doesNotMatch(message, /TRPG_|Guard|finalized/iu);
+  }
+});
+
 test("hidden correction retries stop after three attempts without exposing internal codes", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
@@ -907,7 +926,10 @@ test("hidden correction retries stop after three attempts without exposing inter
   }
   assert.equal(pi.messages.length, 3);
   const fallback = transformed.message.content.map((part) => part.text ?? "").join("");
-  assert.match(fallback, /無法自動完成/);
+  assert.match(fallback, /本回合已暫停/);
+  assert.match(fallback, /狀態確認與保存/);
+  assert.match(fallback, /沒有送出|未送出/);
+  assert.match(fallback, /重新送出上一個行動/);
   assert.doesNotMatch(fallback, /TRPG_|Guard|finalized/iu);
 });
 

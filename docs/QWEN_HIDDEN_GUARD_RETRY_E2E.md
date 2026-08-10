@@ -38,7 +38,9 @@ Current hidden retry codes are:
 - `TRPG_ACTION_NARRATIVE_TOO_TERSE`
 - `TRPG_REJECTED_ACTION_REPLAYED`
 
-Each is delivered as a custom message with `display:false`, `retryable:true`, `deliverAs:"followUp"`, and `triggerTurn:true`. The invalid assistant message is replaced with empty content. Automatic correction is capped at three attempts; after that, the player receives only a generic retry request without an internal code. `agent_settled` remains a fallback rather than the primary correction path.
+Each is delivered as a custom message with `display:false`, `retryable:true`, `deliverAs:"followUp"`, and `triggerTurn:true`. The invalid assistant message is replaced with empty content. Automatic correction is capped at three attempts. `agent_settled` remains a fallback rather than the primary correction path.
+
+The production-like trace above is specifically v0.13.1 evidence and self-corrected after two hidden errors; it did not exhaust retries. Since v0.13.2, retry exhaustion gives the player a specific safe reason—unfinished state validation/persistence, incomplete scene narration, or risk of narrating a rejected action as completed—followed by a request to resend the action, without exposing internal codes. All three exhaustion-message mappings and the fourth-failure boundary are covered deterministically in `tests/test_extension.mjs`. A v0.13.2 Qwen attempt also self-corrected after two hidden errors rather than reaching exhaustion, so it is not claimed as exhaustion-path evidence.
 
 ## Limitation
 

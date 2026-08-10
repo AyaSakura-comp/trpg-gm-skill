@@ -398,7 +398,7 @@ Extension 使用 Pi lifecycle API：
 - `before_agent_start`：每回合注入 context、狀態保存、秘密資訊及玩家自主權 checklist。
 - Typed gameplay tools：`trpg_gm_context`、`trpg_gm_action_adjudicate`、`trpg_gm_check`、`trpg_gm_entity_upsert`、`trpg_gm_character_adjust`、`trpg_gm_character_availability`、`trpg_gm_story_objective`、`trpg_gm_story_progress`、`trpg_gm_story_intervene`、`trpg_gm_canon_set`、`trpg_gm_recap_save` 使用命名欄位與 JSON object，避免模型漏掉 `adjudicate`、room、entity name、傳入非法 decision 或組出壞 JSON。
 - Raw `trpg_gm_cli` fallback：只供 typed tools 尚未涵蓋的 setup/query；以 `pi.exec(executable, args[])` 安全傳遞結構化 tokens。所有工具都在成功後才記錄 exact room、context、玩家行動裁定、check 與 mutation；失敗不更新 guard 狀態。
-- `message_end`：每個新的 user message 都重設 turn-local adjudication／finalization 狀態，避免 Piweb／RPC 未觸發 `input` hook 時沿用上一回合；不合格的 assistant 回覆會被替換成空內容，並以隱藏的 `TRPG_TURN_NOT_FINALIZED`、`TRPG_ACTION_NARRATIVE_TOO_TERSE` 或 `TRPG_REJECTED_ACTION_REPLAYED` follow-up 回傳 agent，立即觸發同回合自我修正，而不是把內部 Guard 訊息顯示給玩家；連續三次仍未修正時停止自動循環，只顯示不含內部代碼的重試提示。
+- `message_end`：每個新的 user message 都重設 turn-local adjudication／finalization 狀態，避免 Piweb／RPC 未觸發 `input` hook 時沿用上一回合；不合格的 assistant 回覆會被替換成空內容，並以隱藏的 `TRPG_TURN_NOT_FINALIZED`、`TRPG_ACTION_NARRATIVE_TOO_TERSE` 或 `TRPG_REJECTED_ACTION_REPLAYED` follow-up 回傳 agent，立即觸發同回合自我修正，而不是把內部 Guard 訊息顯示給玩家；連續三次仍未修正時停止自動循環，並以不含內部代碼的玩家安全文字說明鎖住原因：尚未完成狀態確認與保存、缺少完整場景敘事，或仍可能把 rejected action 誤寫成已發生；最後提示重新送出上一個行動。
 - `agent_settled`：等 retry／compaction 全部完成後，若仍缺少 context 或 finalization，作為 fallback 排入一次 follow-up。
 - Session custom entry：保存 guard 已啟用狀態，使 `/reload` 或 resume 後仍可恢復。
 

@@ -56,6 +56,15 @@ function hasNovelLikeActionPassage(text) {
   });
 }
 
+export function playerSafeCorrectionFailure(code) {
+  const reasons = {
+    TRPG_TURN_NOT_FINALIZED: "系統連續三次都未能完成必要的狀態確認與保存，因此沒有送出可能與遊戲紀錄不一致的結果。",
+    TRPG_ACTION_NARRATIVE_TOO_TERSE: "系統連續三次都未能產生完整的場景敘事，因此沒有送出只有裁定摘要的回覆。",
+    TRPG_REJECTED_ACTION_REPLAYED: "系統連續三次仍可能把被拒絕的行動誤寫成已經發生，因此沒有送出可能改寫場景的回覆。",
+  };
+  return `本回合已暫停：${reasons[code] ?? "系統連續三次未能產生符合規則且狀態一致的回覆，因此沒有送出結果。"}請重新送出上一個行動。`;
+}
+
 function stripExpandedSkillBlocks(text) {
   return String(text ?? "")
     .replace(/<skill\b[^>]*>[\s\S]*?<\/skill>/giu, "")
@@ -1073,7 +1082,7 @@ export default function trpgGmGuard(pi) {
           ...event.message,
           content: [{
             type: "text",
-            text: "本回合無法自動完成，請重新送出上一個行動。",
+            text: playerSafeCorrectionFailure(code),
           }],
         },
       };
