@@ -44,8 +44,9 @@ trpg_gm_recap_save        {db, room, summary, state}
 
 ```text
 讀狀態： ["context",ROOM,"--events","30"]
-裁定：   ["action","adjudicate",ROOM,CHARACTER,PLAYER_ACTION,"--decision","accepted","--basis",BASIS,"--reason",REASON]
-判定：   ["check",ROOM,CHARACTER,STAT]                         # 隨機 d100
+自動裁定：["action","adjudicate",ROOM,CHARACTER,PLAYER_ACTION,"--decision","accepted","--basis",BASIS,"--reason",REASON,"--resolution","automatic"]
+需判定： ["action","adjudicate",ROOM,CHARACTER,PLAYER_ACTION,"--decision","accepted","--basis",BASIS,"--reason",REASON,"--resolution","check_required","--check-stat",STAT,"--check-dc","15"]
+判定：   ["check",ROOM,CHARACTER,STAT]                         # dnd5e 隨機 d20；其他系統隨機 d100
 指定骰： ["check",ROOM,CHARACTER,STAT,"--roll","20"]
 狀態：   ["entity",ROOM,KIND,ID,NAME,"--state",STATE_JSON]
 資源：   ["character","adjust",ROOM,CHARACTER,"hp","-2","--reason",REASON]
@@ -55,7 +56,7 @@ recap：  ["recap","save",ROOM,"--summary",SUMMARY,"--state",STATE_JSON]
 事件：   ["events",ROOM]
 ```
 
-`action adjudicate` 的 `decision` 只能是 `accepted` 或 `rejected`；`check` 不是 decision，而是 accepted 後的下一個獨立 call。`PLAYER_ACTION` 必須逐字複製玩家輸入中的完整連續文字，不可摘要、翻譯或改寫。隨機 d100 判定不要提供 `--roll`；只有玩家明確給出實體骰值或測試要求指定骰值時才可使用。`STATE_JSON` 等 JSON 值在 `args` 中必須是單一字串，例如 `"{\"status\":\"open\",\"turn\":4}"`，不可傳成物件，也不要加入 shell quotes。`entity` 一定需要 `ROOM,KIND,ID,NAME` 四個 positional values；更新既有 entity 仍要提供原本名稱。不存在 `room show`、`room state`、`character list`、`entity upsert`、`check resolve` 等 `show/state/list/upsert/resolve` 猜測用法。不要每回合保存 recap；recap 只在開團建立初始快照、自然 session 停點或玩家明確要求暫停／收尾時保存。
+`action adjudicate` 的 `decision` 只能是 `accepted` 或 `rejected`；每個 accepted action 必須先持久化 `--resolution automatic|check_required`。`check_required` 還必須在擲骰前保存 `--check-stat`，且 dnd5e 必須保存 `--check-dc 1..30`。必要判定完成前，核心禁止 story progress、HP/MP/SAN 後果及下一個 action；`automatic` action 也禁止事後追加骰子。`check` 不是 decision，而是 accepted 後的下一個獨立 call。`PLAYER_ACTION` 必須逐字複製玩家輸入中的完整連續文字，不可摘要、翻譯或改寫。隨機判定不要提供 `--roll`；dnd5e 會擲 d20，其他系統擲 d100。只有玩家明確給出實體骰值或測試要求指定骰值時才可使用。`STATE_JSON` 等 JSON 值在 `args` 中必須是單一字串，例如 `"{\"status\":\"open\",\"turn\":4}"`，不可傳成物件，也不要加入 shell quotes。`entity` 一定需要 `ROOM,KIND,ID,NAME` 四個 positional values；更新既有 entity 仍要提供原本名稱。不存在 `room show`、`room state`、`character list`、`entity upsert`、`check resolve` 等 `show/state/list/upsert/resolve` 猜測用法。不要每回合保存 recap；recap 只在開團建立初始快照、自然 session 停點或玩家明確要求暫停／收尾時保存。
 
 ## 遊戲入口：新團或舊團
 
@@ -80,8 +81,8 @@ Recap 的 `state` 只可包含玩家已知內容，例如 `location`、`known_go
 5. **公平聚光燈**：讀取 `context.participation`。GM 必須讓每個目前可行動的玩家獲得平等的參與與決策機會；只有 `next_spotlight_character_ids` 中最久未完成已接受主要行動的角色可開始下一個主要行動，尚未行動者最優先。舊的累積行動次數只作統計，不得用來長期懲罰或跳過角色。核心會在寫入前強制拒絕其他角色搶先行動，任何 rejected action 都不消耗 spotlight。不可因某位玩家積極就長期只讓該角色推進劇情。被邀請不等於 GM 代替該玩家行動，玩家可以放棄機會。只有 HP 已降至 0，或已用 `character availability --can-act false` 保存昏迷、束縛、離場等確定狀態的角色，才可暫時排除；狀態解除後必須立即恢復 `canAct=true`。
 6. **創角後優先開場**：若 `context.story_progress.opening_guidance_required=true`，代表角色已生成但故事尚未銜接。先根據 `opening_character_ids` 對應角色已保存的背景與概念，用 `story objective --opening-character-ids '[...]'` 保存具體章節與開場目標，並在 reason 逐一引用每名角色的原始背景或概念；接著只描述角色可感知的時空、事件與誘因，將第一個行動選擇交還玩家。開場不得替玩家角色決定為何到場、說什麼、如何反應或是否接受任務。完成此前不得接受玩家 action。
 7. **劇情推進時鐘**：讀取 `context.story_progress` 的目前章節、目標與 `stagnant_action_count`。每個被接受、可實際改變局面的玩家 action 裁定後，都必須用 `story progress --status advanced|stalled` 誠實記錄是否真正推進章節或目標；換地點、重複搜索或只有氣氛變化不算自動推進。連續第三次 `stalled` 時，GM 必須立即用 `story intervene` 保存一個具體的世界事件及其 `intended_progress`，再敘述該事件；不得改目標、繼續接受第四個 action 或虛報 advanced 來清零。需要強制轉場時，必須讓 NPC 行動、敵方攻勢、天候、災害、交通抵達、入口自行開啟或其他劇情事件直接改變場景，不得停下來逼玩家選擇某個特定選項才准轉場。事件發生後提供開放行動空間，詢問玩家如何回應；不得替玩家角色做決定，也不得保證檢定成功。
-8. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。不得僅因行動違反現代法律、當代風俗習慣、道德期待或政治正確而拒絕；以遊戲內時空背景裁定可行性，並在世界中呈現合乎時代的風險與後果。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
-9. **判定**：只有已接受的行動，而且結果不確定、失敗有意義時才擲骰。先說明技能、目標值與風險，再執行 `check`；不可事後竄改骰子。每次判定結果都必須向玩家回報角色、技能、roll、目標值與成功等級，不能只敘述後果，也不能把 `hard` 誤稱為「勉強成功」。標準對照為 `critical=大成功`、`extreme=極難成功`、`hard=困難成功`、`success=成功`、`failure=失敗`、`fumble=大失敗`。
+8. **玩家行動閘門**：玩家宣告任何遊戲內行動後，先判斷它是否符合劇本、canon、角色能力、目前場景與規則，再用 `action adjudicate` 保存原始行動、`accepted`/`rejected`、具體依據與原因。Accepted 只代表「允許嘗試」，絕不代表成功；同時必須保存 `resolution=automatic`（確定、低風險、沒有有意義失敗）或 `resolution=check_required`（結果不確定、對抗、攻擊、防禦、施法、危險操作或失敗有意義）。後者必須事先鎖定角色 stat；dnd5e 也必須事先鎖定 DC。拒絕時必須向玩家說明原因，而且不得為該行動擲骰或改變世界狀態。劇本未逐字列出但在既有設定下合理可行的創意行動不應只因「沒寫」就拒絕；應拒絕的是沒有設定依據、超出角色能力、違反 canon/規則或在目前場景不可能的行動。不得僅因行動違反現代法律、當代風俗習慣、道德期待或政治正確而拒絕；以遊戲內時空背景裁定可行性，並在世界中呈現合乎時代的風險與後果。即使 GM 誤傳 `accepted`，命中 guardrail 的行動也會被 CLI 強制改成 `rejected`。
+9. **判定**：只有 accepted 且已保存為 `check_required` 的行動才能擲骰；`automatic` 不得擲骰。先說明技能、DC／目標值與風險，再執行 `check`；不可事後竄改骰子。dnd5e 能力檢定使用 `d20 + floor((ability-10)/2) >= DC`；依 5e 能力檢定規則，自然 20／1 不會自動成功／失敗。其他目前支援的系統使用既有 d100 目標值。必要判定完成前不得保存後果、story progress 或開始下一個 action。每次判定結果都必須向玩家回報角色、技能、roll、目標值與成功等級，不能只敘述後果，也不能把 `hard` 誤稱為「勉強成功」。標準對照為 `critical=大成功`、`extreme=極難成功`、`hard=困難成功`、`success=成功`、`failure=失敗`、`fumble=大失敗`。
 10. **套用後果**：先用 `character adjust`、`entity`、`canon` 寫入狀態，再敘述確定發生的結果。新增 NPC、線索、場景或支線也必須保存。
 11. **Pi 回合驗證**：若環境提供 `trpg_turn_finalize` 工具，所有 CLI 寫入完成後，在獨立的工具回合以 `turnKind=gameplay` 呼叫它；`playerActionStatus` 必須與已保存的行動裁定一致；沒有玩家行動時才可用 `not_applicable` 並填寫 `noPlayerActionReason`。列出已保存的玩家安全變化，確認未洩密、未替玩家決策，並以 `narrativeDetailChecked=true` 確認已準備下方要求的詳細小說式敘事。若有兩名以上角色可行動，必須把 `nextSpotlightCharacterId` 設成重新計算後 `next_spotlight_character_ids` 的其中一位，並在回覆結尾將下一個有意義的決策機會交給該玩家。若仍在詢問新／舊團、room-id 或缺少的角色設定，可改用 `turnKind=clarification` 並說明等待的玩家輸入；已裁定行動、擲骰或寫入狀態後不得使用此例外。驗證失敗時先補齊狀態，不能直接輸出敘事。其他 agent 沒有此工具時略過工具呼叫，但仍須自行完成同一份檢查。
 12. **回覆玩家**：GM 要負責講故事。每一次玩家行動，不論 `accepted`、`rejected`、規則不允許或當下不可能，都必須先以至少一小段小說式敘事呈現玩家可見的場景、障礙或 NPC／世界反應，再清楚交代裁定、原因與依據。被拒絕的行動並未發生，因此敘事只能呈現既有且未改變的障礙、環境或可感知限制，不得把嘗試寫成已成功執行，也不得因此修改世界。禁止只回覆「某人做了什麼／行動不允許，下一位要怎麼做？」這類裁定摘要與交棒句。保持遊戲內視角，以像小說一樣具體、連貫且有氣氛的段落描述玩家能感知的事；最後問「你要怎麼做？」而不是替玩家選行動。

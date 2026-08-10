@@ -270,6 +270,9 @@ def build_parser() -> argparse.ArgumentParser:
     adjudicate.add_argument("--decision", choices=("accepted", "rejected"), required=True)
     adjudicate.add_argument("--basis", required=True)
     adjudicate.add_argument("--reason", required=True)
+    adjudicate.add_argument("--resolution", choices=("automatic", "check_required"))
+    adjudicate.add_argument("--check-stat")
+    adjudicate.add_argument("--check-dc", type=int)
 
     story = commands.add_parser("story")
     story_commands = story.add_subparsers(dest="action", required=True)
@@ -397,6 +400,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "guardrail" and args.action == "list":
         result = store.list_guardrails(args.room_id)
     elif args.command == "action" and args.action == "adjudicate":
+        if args.decision == "accepted" and args.resolution is None:
+            raise ValueError(
+                "accepted action resolution is required: automatic or check_required"
+            )
         result = store.adjudicate_action(
             args.room_id,
             args.character_id,
@@ -404,6 +411,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             decision=args.decision,
             basis=args.basis,
             reason=args.reason,
+            resolution=args.resolution,
+            check_stat=args.check_stat,
+            check_dc=args.check_dc,
         )
     elif args.command == "story" and args.action == "objective":
         result = store.set_story_objective(
@@ -425,7 +435,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             reason=args.reason,
         )
     elif args.command == "check":
-        roll = args.roll if args.roll is not None else random.SystemRandom().randint(1, 100)
+        pending_resolution = store.get_story_progress(args.room_id)[
+            "pending_action_resolution"
+        ]
+        die_max = (
+            20
+            if store.get_room(args.room_id)["system"] == "dnd5e"
+            and pending_resolution == "check_required"
+            else 100
+        )
+        roll = args.roll if args.roll is not None else random.SystemRandom().randint(1, die_max)
         result = store.record_check(args.room_id, args.character_id, args.stat, roll=roll)
     elif args.command == "recap" and args.action == "save":
         result = store.save_recap(args.room_id, args.summary, args.state)

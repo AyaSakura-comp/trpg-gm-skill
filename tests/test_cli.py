@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from trpg_gm.cli import ROOM_FILE_SUFFIX, main
+from trpg_gm.store import GameStore
 
 
 class CliTests(unittest.TestCase):
@@ -356,6 +357,7 @@ class CliTests(unittest.TestCase):
                 main([
                     "--db", db, "action", "adjudicate", "demo", "alice", "施法打開門",
                     "--decision", "accepted", "--basis", "玩家要求", "--reason", "接受",
+                    "--resolution", "automatic",
                 ])
             ruling = json.loads(output.getvalue())
             self.assertEqual(ruling["decision"], "rejected")
@@ -409,6 +411,7 @@ class CliTests(unittest.TestCase):
                         "--db", db, "action", "adjudicate", "demo", "alice",
                         f"搜索大廳 {index}", "--decision", "accepted",
                         "--basis", "場景允許", "--reason", "一般搜索",
+                        "--resolution", "automatic",
                     ])
                     main([
                         "--db", db, "story", "progress", "demo",
@@ -426,6 +429,61 @@ class CliTests(unittest.TestCase):
             progress = json.loads(output.getvalue())
             self.assertEqual(progress["stagnant_action_count"], 0)
             self.assertFalse(progress["intervention_required"])
+
+    def test_dnd_cli_requires_resolution_and_uses_persisted_d20_dc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "game.db")
+            with redirect_stdout(StringIO()):
+                main(["--db", db, "room", "create", "demo", "--system", "dnd5e"])
+                main([
+                    "--db", db, "character", "add", "demo", "alice", "艾莉絲",
+                    "--hp", "10", "--mp", "2", "--san", "2",
+                    "--stats", '{"敏捷 DEX":16}',
+                ])
+            with self.assertRaisesRegex(ValueError, "resolution.*required"):
+                main([
+                    "--db", db, "action", "adjudicate", "demo", "alice", "翻過鐵門",
+                    "--decision", "accepted", "--basis", "可以嘗試",
+                    "--reason", "結果不確定",
+                ])
+            with redirect_stdout(StringIO()):
+                main([
+                    "--db", db, "action", "adjudicate", "demo", "alice", "翻過鐵門",
+                    "--decision", "accepted", "--basis", "可以嘗試",
+                    "--reason", "結果不確定", "--resolution", "check_required",
+                    "--check-stat", "敏捷 DEX", "--check-dc", "15",
+                ])
+            output = StringIO()
+            with redirect_stdout(output):
+                main(["--db", db, "check", "demo", "alice", "敏捷 DEX", "--roll", "12"])
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["system"], "dnd5e")
+            self.assertEqual(result["roll"], 12)
+            self.assertEqual(result["total"], 15)
+            self.assertEqual(result["target"], 15)
+
+    def test_legacy_dnd_pending_action_randomizes_a_full_d100(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "game.db"
+            store = GameStore(db)
+            store.create_room("demo", "dnd5e")
+            store.add_character(
+                "demo", "alice", "艾莉絲", hp=10, mp=2, san=2,
+                stats={"察覺": 60},
+            )
+            with store._connect() as connection:
+                store._append_event(connection, "demo", "action_adjudicated", {
+                    "character_id": "alice", "action": "調查門縫",
+                    "decision": "accepted", "basis": "legacy",
+                    "reason": "pre-upgrade pending action",
+                })
+
+            output = StringIO()
+            with patch("trpg_gm.cli.random.SystemRandom.randint", return_value=20) as randint:
+                with redirect_stdout(output):
+                    main(["--db", str(db), "check", "demo", "alice", "察覺"])
+            randint.assert_called_once_with(1, 100)
+            self.assertEqual(json.loads(output.getvalue())["system"], "legacy_d100")
 
     def test_action_adjudicate_emits_persisted_ruling(self):
         with tempfile.TemporaryDirectory() as directory:

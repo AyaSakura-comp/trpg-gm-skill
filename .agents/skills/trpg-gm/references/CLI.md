@@ -191,7 +191,8 @@ Every declared in-world player action must be adjudicated before a check or worl
 $GM --db "$DB" action adjudicate my-room alice '調查門縫' \
   --decision accepted \
   --basis 'scene:clinic-door permits close inspection; character can reach the door' \
-  --reason '這是目前位置與一般角色能力允許的調查行動'
+  --reason '這是目前位置與一般角色能力允許的確定行動' \
+  --resolution automatic
 
 # Reject an impossible or setting-breaking action:
 $GM --db "$DB" action adjudicate my-room alice '展開翅膀飛過鎖門' \
@@ -200,19 +201,24 @@ $GM --db "$DB" action adjudicate my-room alice '展開翅膀飛過鎖門' \
   --reason '艾莉絲是普通人，目前也沒有任何可用的飛行手段'
 ```
 
-The command validates the room character, requires non-empty `basis` and `reason`, and persists an `action_adjudicated` event. Every adjudicated attempt contributes to persistent participation accounting regardless of acceptance, because a rejected but possible attempt still represents a player's opportunity to engage. An attempt mechanically rejected because the character is currently unable to act does not count. `decision` is exactly `accepted` or `rejected`. A rejected action must be explained to the player and must not trigger a check or world-state mutation. Do not reject a plausible creative action merely because the script does not enumerate it word-for-word; reject actions that lack established support, exceed character capabilities, contradict canon/rules, or are impossible in the current scene.
+The command validates the room character, requires non-empty `basis` and `reason`, and persists an `action_adjudicated` event. Every accepted CLI action must declare `--resolution automatic` or `--resolution check_required`. A required check also persists `--check-stat STAT`; a dnd5e room additionally requires `--check-dc 1..30`. Acceptance authorizes an attempt, not success. Until the required check resolves, the core blocks story progress, resource consequences, and another action; an automatic action cannot later invent a check. Every adjudicated attempt contributes to persistent participation accounting regardless of acceptance, because a rejected but possible attempt still represents a player's opportunity to engage. An attempt mechanically rejected because the character is currently unable to act does not count. `decision` is exactly `accepted` or `rejected`. A rejected action must be explained to the player and must not trigger a check or world-state mutation. Do not reject a plausible creative action merely because the script does not enumerate it word-for-word; reject actions that lack established support, exceed character capabilities, contradict canon/rules, or are impossible in the current scene.
 
 ## Checks
 
 ```bash
-# Roll a real random d100 and record it:
-$GM --db "$DB" check my-room alice 聆聽
+# First persist an uncertain dnd5e attempt and its DC:
+$GM --db "$DB" action adjudicate my-room alice '翻過鐵門' \
+  --decision accepted --basis '鐵門可以攀越' --reason '高度使失敗有意義' \
+  --resolution check_required --check-stat '敏捷 DEX' --check-dc 15
+
+# Roll the room system's die and record it (d20 for dnd5e, d100 otherwise):
+$GM --db "$DB" check my-room alice '敏捷 DEX'
 
 # Record a physical/player-provided roll:
 $GM --db "$DB" check my-room alice 聆聽 --roll 20
 ```
 
-Built-in resolution is CoC-style d100: critical, extreme, hard, success, failure, fumble. `--system` records campaign identity but this MVP only implements d100 resolution. For another system, store the externally resolved roll as an entity/event convention; do not pretend d100 is that game's official rule.
+Built-in resolution follows the room system. `dnd5e` ability checks use d20 plus the standard ability modifier `floor((score-10)/2)` against the persisted DC; natural 20 and 1 do not automatically succeed or fail an ability check. Other currently supported rooms use CoC-style d100 degrees: critical, extreme, hard, success, failure, fumble. Every result persists its action event, system, roll, target/DC, and applicable modifier/total.
 
 ## Canon
 

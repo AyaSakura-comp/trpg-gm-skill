@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .rules import evaluate_d100
+from .rules import evaluate_d100, evaluate_d20
 
 
 class GameStore:
@@ -390,6 +390,8 @@ class GameStore:
         }
         maximum_column = {"hp": "max_hp", "mp": "max_mp", "san": "max_san"}[resource]
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._assert_no_unresolved_required_check(room_id, connection=db)
             current = db.execute(
                 select_sql[resource], (room_id, character_id)
             ).fetchone()
@@ -412,11 +414,12 @@ class GameStore:
 
     def _append_event(
         self, db: sqlite3.Connection, room_id: str, kind: str, payload: dict[str, Any]
-    ) -> None:
-        db.execute(
+    ) -> int:
+        cursor = db.execute(
             "INSERT INTO events(room_id, created_at, kind, payload_json) VALUES (?, ?, ?, ?)",
             (room_id, datetime.now(timezone.utc).isoformat(), kind, json.dumps(payload, ensure_ascii=False)),
         )
+        return int(cursor.lastrowid)
 
     @staticmethod
     def _normalize_guardrail_text(value: str) -> str:
@@ -931,6 +934,22 @@ class GameStore:
             and self._counts_for_story_progress(event)
             and event["id"] not in assessed_action_ids
         ]
+        pending_action = pending_actions[-1] if pending_actions else None
+        pending_payload = pending_action["payload"] if pending_action else {}
+        pending_action_id = pending_action["id"] if pending_action else None
+        pending_check_resolved = any(
+            event["kind"] == "check_resolved"
+            and event["id"] > pending_action_id
+            and (
+                event["payload"].get("action_event_id") == pending_action_id
+                or (
+                    "action_event_id" not in event["payload"]
+                    and event["payload"].get("character_id")
+                    == pending_payload.get("character_id")
+                )
+            )
+            for event in room_events
+        ) if pending_action_id is not None else False
         return {
             "chapter": objective_payload["chapter"],
             "objective": objective_payload["objective"],
@@ -940,7 +959,15 @@ class GameStore:
             "stagnant_action_count": stagnant_action_count,
             "stagnation_limit": 3,
             "intervention_required": stagnant_action_count >= 3,
-            "pending_action_event_id": pending_actions[-1]["id"] if pending_actions else None,
+            "pending_action_event_id": pending_action_id,
+            "pending_action_resolution": (
+                pending_payload.get("resolution", "legacy_unclassified")
+                if pending_action else None
+            ),
+            "pending_action_character_id": pending_payload.get("character_id"),
+            "pending_check_stat": pending_payload.get("check_stat"),
+            "pending_check_dc": pending_payload.get("check_dc"),
+            "pending_check_resolved": pending_check_resolved,
             "last_progress_event_id": last_progress_event_id,
         }
 
@@ -988,6 +1015,37 @@ class GameStore:
             self._append_event(db, room_id, "story_objective_set", payload)
         return self.get_story_progress(room_id)
 
+    def _assert_no_unresolved_required_check(
+        self, room_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> None:
+        def inspect(db: sqlite3.Connection) -> None:
+            rows = db.execute(
+                "SELECT id, created_at, kind, payload_json FROM events "
+                "WHERE room_id = ? ORDER BY id",
+                (room_id,),
+            ).fetchall()
+            events = [
+                {
+                    "id": row["id"], "created_at": row["created_at"],
+                    "kind": row["kind"], "payload": json.loads(row["payload_json"]),
+                }
+                for row in rows
+            ]
+            progress = self.get_story_progress(room_id, events)
+            if (
+                progress["pending_action_resolution"] == "check_required"
+                and not progress["pending_check_resolved"]
+            ):
+                raise ValueError(
+                    "required check is unresolved; resolve it before persisting consequences"
+                )
+
+        if connection is not None:
+            inspect(connection)
+        else:
+            with self._connect() as db:
+                inspect(db)
+
     def record_story_progress(
         self, room_id: str, *, status: str, reason: str
     ) -> dict[str, Any]:
@@ -995,16 +1053,24 @@ class GameStore:
             raise ValueError("story progress status must be advanced or stalled")
         if not reason.strip():
             raise ValueError("story progress reason must not be empty")
-        progress = self.get_story_progress(room_id)
-        action_event_id = progress["pending_action_event_id"]
-        if action_event_id is None:
-            raise ValueError("story progress requires an unassessed player action")
-        payload = {
-            "action_event_id": action_event_id,
-            "status": status,
-            "reason": reason.strip(),
-        }
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            progress = self.get_story_progress(room_id, self.list_events(room_id))
+            action_event_id = progress["pending_action_event_id"]
+            if action_event_id is None:
+                raise ValueError("story progress requires an unassessed player action")
+            if (
+                progress["pending_action_resolution"] == "check_required"
+                and not progress["pending_check_resolved"]
+            ):
+                raise ValueError(
+                    "required check is unresolved; resolve it before recording story progress"
+                )
+            payload = {
+                "action_event_id": action_event_id,
+                "status": status,
+                "reason": reason.strip(),
+            }
             self._append_event(db, room_id, "story_progress_recorded", payload)
         return self.get_story_progress(room_id)
 
@@ -1060,6 +1126,9 @@ class GameStore:
         decision: str,
         basis: str,
         reason: str,
+        resolution: str | None = "automatic",
+        check_stat: str | None = None,
+        check_dc: int | None = None,
     ) -> dict[str, Any]:
         if decision not in {"accepted", "rejected"}:
             raise ValueError("decision must be accepted or rejected")
@@ -1069,8 +1138,26 @@ class GameStore:
             raise ValueError("basis must explain the scenario, canon, rules, or established state")
         if not reason.strip():
             raise ValueError("reason must explain why the action is accepted or rejected")
-        if self.get_character(room_id, character_id) is None:
+        character = self.get_character(room_id, character_id)
+        if character is None:
             raise KeyError(f"unknown character: {room_id}/{character_id}")
+        room = self.get_room(room_id)
+        if decision == "accepted":
+            if resolution not in {"automatic", "check_required"}:
+                raise ValueError(
+                    "accepted action resolution must be automatic or check_required"
+                )
+            if resolution == "automatic" and (check_stat is not None or check_dc is not None):
+                raise ValueError("automatic action must not define check stat or DC")
+            if resolution == "check_required":
+                if not check_stat or check_stat not in character["stats"]:
+                    raise ValueError("check_required action must name a saved character stat")
+                if room["system"] == "dnd5e" and not (
+                    isinstance(check_dc, int) and 1 <= check_dc <= 30
+                ):
+                    raise ValueError("dnd5e check_required action must define DC 1..30")
+                if room["system"] != "dnd5e" and check_dc is not None:
+                    raise ValueError("non-dnd5e checks derive their target from the character stat")
         requested_decision = decision
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -1136,6 +1223,12 @@ class GameStore:
                 "decision": decision,
                 "basis": basis.strip(),
                 "reason": reason.strip(),
+                "resolution": resolution if decision == "accepted" else "not_applicable",
+                **(
+                    {"check_stat": check_stat, "check_dc": check_dc}
+                    if decision == "accepted" and resolution == "check_required"
+                    else {}
+                ),
                 **enforcement,
             }
             self._append_event(db, room_id, "action_adjudicated", result)
@@ -1177,22 +1270,59 @@ class GameStore:
             raise ValueError(
                 "a check requires a pending accepted action for the same character"
             )
+        resolution = pending_action.get("resolution")
+        if resolution == "automatic":
+            raise ValueError("automatic action must not resolve a check")
+        if resolution not in {None, "check_required"}:
+            raise ValueError("pending action has an invalid resolution mode")
+        if resolution == "check_required" and stat != pending_action.get("check_stat"):
+            raise ValueError(
+                f"required check must use persisted stat: {pending_action.get('check_stat')}"
+            )
         if stat not in character["stats"]:
             raise KeyError(f"unknown stat for {character_id}: {stat}")
-        target = character["stats"][stat]
-        result = {
-            "character_id": character_id,
-            "stat": stat,
-            "roll": roll,
-            "target": target,
-            "degree": evaluate_d100(roll, target),
-        }
+        ability_score = character["stats"][stat]
+        room = self.get_room(room_id)
+        if room["system"] == "dnd5e" and resolution == "check_required":
+            dc = pending_action["check_dc"]
+            d20 = evaluate_d20(roll, ability_score, dc)
+            result = {
+                "character_id": character_id,
+                "stat": stat,
+                "roll": roll,
+                "target": dc,
+                "system": "dnd5e",
+                "action_event_id": pending_action_event_id,
+                **d20,
+            }
+        else:
+            result = {
+                "character_id": character_id,
+                "stat": stat,
+                "roll": roll,
+                "target": ability_score,
+                "degree": evaluate_d100(roll, ability_score),
+                "system": (
+                    "legacy_d100" if resolution is None else room["system"]
+                ),
+                "action_event_id": pending_action_event_id,
+            }
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            prior_check = db.execute(
+                "SELECT 1 FROM events WHERE room_id = ? AND kind = 'check_resolved' "
+                "AND id > ? AND json_extract(payload_json, '$.action_event_id') = ?",
+                (room_id, pending_action_event_id, pending_action_event_id),
+            ).fetchone()
+            if prior_check is not None:
+                raise ValueError("required check has already been resolved")
             self._append_event(db, room_id, "check_resolved", result)
         return result
 
     def set_canon(self, room_id: str, key: str, value: str, *, source: str) -> None:
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._assert_no_unresolved_required_check(room_id, connection=db)
             existing = db.execute(
                 "SELECT value FROM canon WHERE room_id = ? AND key = ?", (room_id, key)
             ).fetchone()
@@ -1209,6 +1339,8 @@ class GameStore:
         self, room_id: str, kind: str, entity_id: str, name: str, state: dict[str, Any]
     ) -> None:
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._assert_no_unresolved_required_check(room_id, connection=db)
             existing = db.execute(
                 "SELECT state_json FROM entities WHERE room_id = ? AND kind = ? AND id = ?",
                 (room_id, kind, entity_id),

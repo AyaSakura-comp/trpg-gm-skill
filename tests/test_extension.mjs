@@ -170,6 +170,9 @@ const runAction = async (pi, {
   decision = "accepted",
   basis = "目前場景允許角色接近並調查這扇門",
   reason = "角色具備執行此行動所需的一般能力",
+  resolution = decision === "accepted" ? "automatic" : "not_applicable",
+  checkStat,
+  checkDc,
   db,
 } = {}) => {
   const original = pi.execResult;
@@ -181,15 +184,22 @@ const runAction = async (pi, {
       decision,
       basis,
       reason,
+      resolution,
+      ...(checkStat ? { check_stat: checkStat } : {}),
+      ...(checkDc !== undefined ? { check_dc: checkDc } : {}),
     }),
     stderr: "",
     killed: false,
   };
   try {
-    return await runCli(pi, [
+    const args = [
       "action", "adjudicate", roomId, characterId, action,
       "--decision", decision, "--basis", basis, "--reason", reason,
-    ], db);
+    ];
+    if (decision === "accepted") args.push("--resolution", resolution);
+    if (checkStat) args.push("--check-stat", checkStat);
+    if (checkDc !== undefined) args.push("--check-dc", String(checkDc));
+    return await runCli(pi, args, db);
   } finally {
     pi.execResult = original;
   }
@@ -698,6 +708,142 @@ test("HP depletion refreshes finalizer spotlight eligibility", async () => {
   });
 });
 
+test("typed accepted actions require an explicit resolution mode", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  await pi.handlers.get("input")(
+    { text: "我撞開鐵門", source: "interactive" }, context(),
+  );
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  pi.execCalls.length = 0;
+  await assert.rejects(
+    () => pi.tools.get("trpg_gm_action_adjudicate").execute("action", {
+      db: "/tmp/game.db", room: "room-a", character: "pc",
+      action: "我撞開鐵門", decision: "accepted",
+      basis: "可以嘗試", reason: "結果不確定",
+    }),
+    /resolution.*automatic.*check_required/i,
+  );
+  assert.equal(pi.execCalls.length, 0);
+});
+
+test("persisted required check can resume after a new agent turn", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  await pi.handlers.get("input")(
+    { text: "繼續完成剛才的判定", source: "interactive" }, context(),
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: { characters: [] },
+    story_progress: {
+      chapter: "第一章", objective: "翻過鐵門",
+      opening_guidance_required: false, opening_character_ids: [],
+      stagnant_action_count: 0, intervention_required: false,
+      pending_action_event_id: 7,
+      pending_action_resolution: "check_required",
+      pending_action_character_id: "pc",
+      pending_check_stat: "力量",
+      pending_check_dc: 15,
+      pending_check_resolved: false,
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    character_id: "pc", stat: "力量", roll: 13, target: 15,
+    modifier: 2, total: 15, degree: "success", system: "dnd5e",
+  }), stderr: "", killed: false };
+
+  await pi.tools.get("trpg_gm_check").execute("check", {
+    db: "/tmp/game.db", room: "room-a", character: "pc", stat: "力量",
+  });
+});
+
+test("legacy persisted action can finish its pre-upgrade check", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  await pi.handlers.get("input")(
+    { text: "繼續舊版待完成判定", source: "interactive" }, context(),
+  );
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    participation: { characters: [] },
+    story_progress: {
+      chapter: "第一章", objective: "調查門後",
+      opening_guidance_required: false, opening_character_ids: [],
+      stagnant_action_count: 0, intervention_required: false,
+      pending_action_event_id: 4,
+      pending_action_resolution: "legacy_unclassified",
+      pending_action_character_id: "pc",
+      pending_check_stat: null, pending_check_dc: null,
+      pending_check_resolved: false,
+    },
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    character_id: "pc", stat: "察覺", roll: 25, target: 60,
+    degree: "hard", system: "legacy_d100",
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_check").execute("check", {
+    db: "/tmp/game.db", room: "room-a", character: "pc", stat: "察覺",
+  });
+});
+
+test("automatic actions cannot invent an unplanned check", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  await pi.handlers.get("input")(
+    { text: "我走到門邊", source: "interactive" }, context(),
+  );
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await runAction(pi, { db: "/tmp/game.db", action: "我走到門邊" });
+  await assert.rejects(
+    () => pi.tools.get("trpg_gm_check").execute("check", {
+      db: "/tmp/game.db", room: "room-a", character: "pc", stat: "敏捷",
+    }),
+    /automatic action.*check/i,
+  );
+});
+
+test("required check blocks progress and consequences until it resolves", async () => {
+  const pi = createFakePi();
+  trpgGuard(pi);
+  await pi.handlers.get("input")(
+    { text: "我撞開鐵門", source: "interactive" }, context(),
+  );
+  await pi.tools.get("trpg_gm_context").execute("context", {
+    db: "/tmp/game.db", room: "room-a",
+  });
+  await runAction(pi, {
+    db: "/tmp/game.db", action: "我撞開鐵門",
+    resolution: "check_required", checkStat: "力量", checkDc: 15,
+  });
+
+  await assert.rejects(() => runProgress(pi, "/tmp/game.db"), /required check.*resolve/i);
+  await assert.rejects(
+    () => pi.tools.get("trpg_gm_character_adjust").execute("damage", {
+      db: "/tmp/game.db", room: "room-a", character: "pc",
+      resource: "hp", delta: -4, reason: "撞門反作用力",
+    }),
+    /required check.*resolve/i,
+  );
+
+  pi.execResult = { code: 0, stdout: JSON.stringify({
+    character_id: "pc", stat: "力量", roll: 14, target: 15,
+    modifier: 2, total: 16, degree: "success", system: "dnd5e",
+  }), stderr: "", killed: false };
+  await pi.tools.get("trpg_gm_check").execute("check", {
+    db: "/tmp/game.db", room: "room-a", character: "pc", stat: "力量",
+  });
+  await runProgress(pi, "/tmp/game.db");
+});
+
 test("dedicated gameplay tools build exact CLI calls and share turn tracking", async () => {
   const pi = createFakePi();
   trpgGuard(pi);
@@ -715,6 +861,7 @@ test("dedicated gameplay tools build exact CLI calls and share turn tracking", a
     stdout: JSON.stringify({
       character_id: "pc", action: "我仔細檢查門縫", decision: "accepted",
       basis: "scene:door", reason: "角色可以接近門縫",
+      resolution: "check_required", check_stat: "偵查",
     }),
     stderr: "", killed: false,
   };
@@ -722,8 +869,8 @@ test("dedicated gameplay tools build exact CLI calls and share turn tracking", a
     db: "/tmp/game.sqlite3", room: "room-a", character: "pc",
     action: "我仔細檢查門縫", decision: "accepted",
     basis: "scene:door", reason: "角色可以接近門縫",
+    resolution: "check_required", checkStat: "偵查",
   });
-  await runProgress(pi, pi.execCalls[0].args[1]);
 
   pi.execResult = { code: 0, stdout: JSON.stringify({
     character_id: "pc", stat: "偵查", roll: 31, target: 60, degree: "success",
@@ -731,6 +878,7 @@ test("dedicated gameplay tools build exact CLI calls and share turn tracking", a
   await pi.tools.get("trpg_gm_check").execute("check", {
     db: "/tmp/game.sqlite3", room: "room-a", character: "pc", stat: "偵查",
   });
+  await runProgress(pi, pi.execCalls[0].args[1]);
   pi.execResult = { code: 0, stdout: '{"ok":true}', stderr: "", killed: false };
   await pi.tools.get("trpg_gm_entity_upsert").execute("entity", {
     db: "/tmp/game.sqlite3", room: "room-a", kind: "clue", id: "fiber",
@@ -739,9 +887,9 @@ test("dedicated gameplay tools build exact CLI calls and share turn tracking", a
 
   assert.deepEqual(pi.execCalls.map((call) => call.args.slice(2)), [
     ["context", "room-a", "--events", "30"],
-    ["action", "adjudicate", "room-a", "pc", "我仔細檢查門縫", "--decision", "accepted", "--basis", "scene:door", "--reason", "角色可以接近門縫"],
-    ["story", "progress", "room-a", "--status", "advanced", "--reason", "測試中記錄本次 action 的劇情推進"],
+    ["action", "adjudicate", "room-a", "pc", "我仔細檢查門縫", "--decision", "accepted", "--basis", "scene:door", "--reason", "角色可以接近門縫", "--resolution", "check_required", "--check-stat", "偵查"],
     ["check", "room-a", "pc", "偵查"],
+    ["story", "progress", "room-a", "--status", "advanced", "--reason", "測試中記錄本次 action 的劇情推進"],
     ["entity", "room-a", "clue", "fiber", "門縫纖維", "--state", '{"discovered":true,"turn":3}'],
   ]);
   const result = await pi.tools.get("trpg_turn_finalize").execute("finalize", {
@@ -1102,9 +1250,9 @@ test("finalizer rejects a turn without context or persisted state accounting", a
   );
 
   await runCli(pi, ["context", "room-a"]);
-  await runAction(pi);
-  await runProgress(pi);
+  await runAction(pi, { resolution: "check_required", checkStat: "觀察" });
   await runCli(pi, ["check", "room-a", "pc", "觀察"]);
+  await runProgress(pi);
 
   await assert.rejects(
     () => finalizer.execute("call-2", {
@@ -1208,14 +1356,14 @@ test("successful finalization prevents follow-up reminders", async () => {
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
-  await runAction(pi);
-  await runProgress(pi);
+  await runAction(pi, { resolution: "check_required", checkStat: "觀察" });
   for (const args of [
     ["check", "room-a", "pc", "觀察"],
     ["entity", "room-a", "clue", "c1", "線索", "--state", "{}"],
   ]) {
     await runCli(pi, args);
   }
+  await runProgress(pi);
 
   const finalizer = pi.tools.get("trpg_turn_finalize");
   const result = await finalizer.execute("call-3", {
@@ -1559,7 +1707,7 @@ test("explicit check rolls require a player-provided roll", async () => {
 
   await assert.rejects(
     runCli(pi, ["check", "room-a", "pc", "觀察", "--roll", "50"]),
-    /omit --roll.*random d100/i,
+    /omit --roll.*random room-system die/i,
   );
   assert.equal(pi.execCalls.length, 1);
 
@@ -1575,11 +1723,13 @@ test("explicit check rolls require a player-provided roll", async () => {
   assert.equal(pi.execCalls.length, 2);
 
   await pi.handlers.get("input")(
-    { text: "我調查門縫；我的實體骰結果是 20", source: "interactive" },
+    { text: "我調查門縫；我的 d20 是 20", source: "interactive" },
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
-  await runAction(pi, { action: "我調查門縫" });
+  await runAction(pi, {
+    action: "我調查門縫", resolution: "check_required", checkStat: "觀察",
+  });
   await runCli(pi, ["check", "room-a", "pc", "觀察", "--roll", "20"]);
   assert.equal(pi.execCalls.length, 5);
 });
@@ -1845,22 +1995,25 @@ test("final player-facing answer reports every resolved check canonically", asyn
     ctx,
   );
   await runCli(pi, ["context", "room-a"]);
-  await runAction(pi);
-  await runProgress(pi);
+  await runAction(pi, { resolution: "check_required", checkStat: "察覺" });
 
   pi.execResult = {
     code: 0,
     stdout: JSON.stringify({
       character_id: "pc",
       stat: "察覺",
-      roll: 27,
-      target: 60,
-      degree: "hard",
+      roll: 12,
+      target: 15,
+      degree: "success",
+      system: "dnd5e",
+      modifier: 3,
+      total: 15,
     }),
     stderr: "",
     killed: false,
   };
   await runCli(pi, ["check", "room-a", "pc", "察覺"]);
+  await runProgress(pi);
 
   await pi.tools.get("trpg_turn_finalize").execute("check-report", {
     turnKind: "gameplay",
@@ -1884,10 +2037,12 @@ test("final player-facing answer reports every resolved check canonically", asyn
   assert.match(text, /判定結果/);
   assert.match(text, /pc/);
   assert.match(text, /察覺/);
-  assert.match(text, /困難成功/);
-  assert.match(text, /hard/);
-  assert.match(text, /roll 27/);
-  assert.match(text, /目標 60/);
+  assert.match(text, /成功/);
+  assert.match(text, /success/);
+  assert.match(text, /d20 12/);
+  assert.match(text, /加值 \+3/);
+  assert.match(text, /總計 15/);
+  assert.match(text, /DC 15/);
 });
 
 test("player action resolution cannot execute before context", async () => {

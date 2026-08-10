@@ -610,10 +610,10 @@ $GM --db "$DB" context miskatonic --events 30
   → 載入 context
   → 讀取相關劇本段落
   → 檢查角色是否能執行
-  → action adjudicate 保存接受／拒絕、依據與原因
+  → action adjudicate 保存接受／拒絕、依據、原因與 automatic/check_required
   → 若拒絕：不擲骰、不改狀態，向玩家說明原因
-  → 若接受：判斷是否需要擲骰
-  → 執行判定
+  → 若接受：先鎖定 resolution；必要判定同時鎖定 stat 與 dnd5e DC
+  → 執行判定；完成前禁止 progress、資源後果與下一個 action
   → 寫入資源、NPC、線索或支線變化
   → Pi：呼叫 trpg_turn_finalize 驗證本回合
   → 描述玩家角色能感知的結果
@@ -629,11 +629,17 @@ $GM --db "$DB" action adjudicate miskatonic alice '展開翅膀飛過鎖門' \
   --reason '角色沒有翅膀或其他飛行手段'
 ```
 
-接受與拒絕都會保存為 `action_adjudicated` 事件。拒絕必須說明原因與設定依據，而且不能接著擲骰或寫入該行動的世界後果。
+接受與拒絕都會保存為 `action_adjudicated` 事件。拒絕必須說明原因與設定依據，而且不能接著擲骰或寫入該行動的世界後果。Accepted 只代表允許嘗試，並必須明確選擇 `automatic` 或 `check_required`：
+
+```bash
+$GM --db "$DB" action adjudicate miskatonic alice '翻過鐵門' \
+  --decision accepted --basis '鐵門可攀越' --reason '高度使失敗有意義' \
+  --resolution check_required --check-stat '敏捷 DEX' --check-dc 15
+```
 
 ### 6. 需要判定時
 
-由程式擲 d100 並保存結果：
+由程式依 room system 擲骰並保存結果（`dnd5e` 使用 d20，其他既有系統使用 d100）：
 
 ```bash
 $GM --db "$DB" check miskatonic alice 聆聽
@@ -978,8 +984,9 @@ $GM --db "$DB" entity "$ROOM" npc keeper 管理員 \
 
 ## 目前邊界
 
-- `room.system` 可以記錄任意系統，但內建判定器目前只實作 CoC 類 d100。
-- 其他規則系統應新增 rules adapter；在此之前，agent 不應把 d100 冒充其他系統的正式規則。
+- 內建判定器支援 CoC 類 d100，以及 `dnd5e` 能力檢定的 `d20 + ability modifier` 對 persisted DC；依 5e 規則，自然 20／1 不會讓能力檢定自動成功／失敗。
+- 尚未實作的規則系統仍應新增 rules adapter；agent 不得把 d100 冒充該系統的正式規則。
+- 每個 accepted action 都必須明確標記 `automatic` 或 `check_required`。必要判定未完成前，SQLite 核心會拒絕 story progress、HP/MP/SAN 後果及下一個 action；automatic action 不得事後補骰。
 - Entity 更新採 merge-upsert，尚未提供刪除單一欄位或自動 schema 驗證。
 - Canon 刻意禁止靜默覆寫；正式 retcon 需要先告知玩家，未來可加入專用 retcon event。
 

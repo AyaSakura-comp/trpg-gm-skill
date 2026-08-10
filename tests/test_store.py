@@ -1000,6 +1000,7 @@ class GameStoreTests(unittest.TestCase):
             store.adjudicate_action(
                 "room-a", "bob", "我聆聽門後", decision="accepted",
                 basis="目前場景允許調查", reason="一般調查行動可行",
+                resolution="check_required", check_stat="聆聽",
             )
 
             with self.assertRaisesRegex(ValueError, "accepted.*same character"):
@@ -1007,6 +1008,220 @@ class GameStoreTests(unittest.TestCase):
 
             result = store.record_check("room-a", "bob", "聆聽", roll=20)
             self.assertEqual(result["character_id"], "bob")
+
+    def test_accepted_action_rejects_unknown_resolution_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "dnd5e")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=2, san=2,
+                stats={"敏捷 DEX": 16},
+            )
+
+            with self.assertRaisesRegex(ValueError, "resolution.*automatic.*check_required"):
+                store.adjudicate_action(
+                    "room-a", "alice", "我翻過鐵門", decision="accepted",
+                    basis="可以嘗試攀越", reason="結果具有不確定性",
+                    resolution="narrative_only",
+                )
+
+    def test_dnd_required_check_blocks_progress_until_d20_is_resolved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "dnd5e")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=2, san=2,
+                stats={"敏捷 DEX": 16},
+            )
+            ruling = store.adjudicate_action(
+                "room-a", "alice", "我翻過鐵門", decision="accepted",
+                basis="可以嘗試攀越", reason="高度與落點使結果不確定",
+                resolution="check_required", check_stat="敏捷 DEX", check_dc=15,
+            )
+            self.assertEqual(ruling["resolution"], "check_required")
+            pending = store.get_story_progress("room-a")
+            self.assertEqual(pending["pending_action_resolution"], "check_required")
+            self.assertEqual(pending["pending_check_stat"], "敏捷 DEX")
+            self.assertEqual(pending["pending_check_dc"], 15)
+            self.assertFalse(pending["pending_check_resolved"])
+
+            with self.assertRaisesRegex(ValueError, "required check.*unresolved"):
+                store.record_story_progress(
+                    "room-a", status="advanced", reason="尚未真正完成"
+                )
+            with self.assertRaisesRegex(ValueError, "required check.*unresolved"):
+                store.adjust_resource(
+                    "room-a", "alice", "hp", -4, "尚未判定的撞門反作用力"
+                )
+            with self.assertRaisesRegex(ValueError, "required check.*unresolved"):
+                store.upsert_entity(
+                    "room-a", "location", "door", "鐵門", {"status": "open"}
+                )
+            with self.assertRaisesRegex(ValueError, "required check.*unresolved"):
+                store.set_canon(
+                    "room-a", "door:status", "open", source="unresolved action"
+                )
+
+            result = store.record_check("room-a", "alice", "敏捷 DEX", roll=12)
+            self.assertEqual(result["system"], "dnd5e")
+            self.assertEqual(result["modifier"], 3)
+            self.assertEqual(result["total"], 15)
+            self.assertEqual(result["target"], 15)
+            self.assertEqual(result["degree"], "success")
+            self.assertEqual(
+                result["action_event_id"],
+                store.get_story_progress("room-a")["pending_action_event_id"],
+            )
+            progress = store.record_story_progress(
+                "room-a", status="advanced", reason="成功翻過鐵門"
+            )
+            self.assertIsNone(progress["pending_action_event_id"])
+
+    def test_resource_consequence_cannot_race_past_a_new_required_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "dnd5e")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=2, san=2,
+                stats={"敏捷 DEX": 16},
+            )
+            checked = threading.Event()
+            release = threading.Event()
+            original_guard = store._assert_no_unresolved_required_check
+
+            def pause_after_guard(room_id, *args, **kwargs):
+                original_guard(room_id, *args, **kwargs)
+                checked.set()
+                release.wait(timeout=2)
+
+            store._assert_no_unresolved_required_check = pause_after_guard
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                mutation = executor.submit(
+                    store.adjust_resource,
+                    "room-a", "alice", "hp", -1, "場景既有傷害",
+                )
+                self.assertTrue(checked.wait(timeout=1))
+                action = executor.submit(
+                    store.adjudicate_action,
+                    "room-a", "alice", "我翻過鐵門",
+                    decision="accepted", basis="可以嘗試攀越",
+                    reason="高度使結果不確定", resolution="check_required",
+                    check_stat="敏捷 DEX", check_dc=15,
+                )
+                release.set()
+                mutation.result(timeout=2)
+                action.result(timeout=2)
+
+            ordered_kinds = [event["kind"] for event in store.list_events("room-a")]
+            self.assertLess(
+                ordered_kinds.index("resource_changed"),
+                ordered_kinds.index("action_adjudicated"),
+            )
+
+    def test_concurrent_story_progress_can_only_assess_an_action_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "coc7")
+            store.add_character("room-a", "alice", "艾莉絲", hp=10, mp=8, san=55)
+            store.adjudicate_action(
+                "room-a", "alice", "我走到門邊", decision="accepted",
+                basis="道路暢通", reason="一般移動", resolution="automatic",
+            )
+            barrier = threading.Barrier(2)
+
+            def assess_once():
+                barrier.wait()
+                try:
+                    store.record_story_progress(
+                        "room-a", status="advanced", reason="抵達門邊"
+                    )
+                    return "recorded"
+                except ValueError as error:
+                    return str(error)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _index: assess_once(), range(2)))
+
+            self.assertEqual(results.count("recorded"), 1)
+            self.assertEqual(
+                sum("unassessed player action" in result for result in results), 1
+            )
+
+    def test_concurrent_required_checks_can_only_resolve_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "dnd5e")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=2, san=2,
+                stats={"敏捷 DEX": 16},
+            )
+            store.adjudicate_action(
+                "room-a", "alice", "我翻過鐵門", decision="accepted",
+                basis="可以嘗試攀越", reason="高度使結果不確定",
+                resolution="check_required", check_stat="敏捷 DEX", check_dc=15,
+            )
+            barrier = threading.Barrier(2)
+
+            def resolve_once():
+                barrier.wait()
+                try:
+                    return store.record_check(
+                        "room-a", "alice", "敏捷 DEX", roll=12
+                    )["degree"]
+                except ValueError as error:
+                    return str(error)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _index: resolve_once(), range(2)))
+
+            self.assertEqual(results.count("success"), 1)
+            self.assertEqual(
+                sum("already been resolved" in result for result in results), 1
+            )
+            self.assertEqual(
+                sum(event["kind"] == "check_resolved" for event in store.list_events("room-a")),
+                1,
+            )
+
+    def test_legacy_pending_action_without_resolution_can_finish_its_old_d100_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "dnd5e")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=8, san=55,
+                stats={"聆聽": 60},
+            )
+            with store._connect() as db:
+                store._append_event(db, "room-a", "action_adjudicated", {
+                    "character_id": "alice", "action": "聆聽門後",
+                    "decision": "accepted", "basis": "legacy",
+                    "reason": "created before resolution modes",
+                })
+
+            self.assertEqual(
+                store.get_story_progress("room-a")["pending_action_resolution"],
+                "legacy_unclassified",
+            )
+            result = store.record_check("room-a", "alice", "聆聽", roll=20)
+            self.assertEqual(result["degree"], "hard")
+            self.assertEqual(result["system"], "legacy_d100")
+
+    def test_automatic_action_rejects_an_unplanned_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(Path(directory) / "campaign.db")
+            store.create_room("room-a", "dnd5e")
+            store.add_character(
+                "room-a", "alice", "艾莉絲", hp=10, mp=2, san=2,
+                stats={"敏捷 DEX": 16},
+            )
+            store.adjudicate_action(
+                "room-a", "alice", "我走到門邊", decision="accepted",
+                basis="道路暢通", reason="這是無風險的一般移動",
+                resolution="automatic",
+            )
+
+            with self.assertRaisesRegex(ValueError, "automatic action.*check"):
+                store.record_check("room-a", "alice", "敏捷 DEX", roll=12)
 
     def test_record_check_uses_character_stat_and_logs_result(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1019,6 +1234,7 @@ class GameStoreTests(unittest.TestCase):
             store.adjudicate_action(
                 "room-a", "alice", "我聆聽門後", decision="accepted",
                 basis="目前場景允許調查", reason="一般調查行動可行",
+                resolution="check_required", check_stat="聆聽",
             )
             result = store.record_check("room-a", "alice", "聆聽", roll=20)
 

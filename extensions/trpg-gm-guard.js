@@ -31,11 +31,18 @@ function parseCheckReport(stdout) {
     roll: Number(value.roll),
     target: Number(value.target),
     degree: String(value.degree),
+    system: value.system === undefined ? null : String(value.system),
+    modifier: value.modifier === undefined ? null : Number(value.modifier),
+    total: value.total === undefined ? null : Number(value.total),
   };
 }
 
 function formatCheckReport(check) {
   const label = DEGREE_LABELS[check.degree] ?? check.degree;
+  if (check.system === "dnd5e" && check.modifier !== null && check.total !== null) {
+    const signedModifier = check.modifier >= 0 ? `+${check.modifier}` : String(check.modifier);
+    return `- ${check.characterId} 的${check.stat}：${label}（${check.degree}，d20 ${check.roll}，加值 ${signedModifier}，總計 ${check.total}，DC ${check.target}）`;
+  }
   return `- ${check.characterId} 的${check.stat}：${label}（${check.degree}，roll ${check.roll}，目標 ${check.target}）`;
 }
 
@@ -335,6 +342,12 @@ function parseStoryProgress(stdout) {
       openingCharacterIds: progress.opening_character_ids.map(String),
       stagnantActionCount: progress.stagnant_action_count,
       interventionRequired: progress.intervention_required,
+      pendingActionEventId: progress.pending_action_event_id ?? null,
+      pendingActionResolution: progress.pending_action_resolution ?? null,
+      pendingActionCharacterId: progress.pending_action_character_id ?? null,
+      pendingCheckStat: progress.pending_check_stat ?? null,
+      pendingCheckDc: progress.pending_check_dc ?? null,
+      pendingCheckResolved: progress.pending_check_resolved === true,
     };
   } catch {
     return null;
@@ -378,6 +391,8 @@ function freshTurn() {
     actionAdjudications: [],
     actionRulingAppended: false,
     checkResolved: false,
+    requiredCheckPending: false,
+    latestActionResolution: null,
     checkReports: [],
     checkReportAppended: false,
     mutationPersisted: false,
@@ -400,11 +415,11 @@ function checklist() {
     "5. After all state commands finish, call trpg_turn_finalize in a separate tool round before the final player-facing answer.",
     "6. Use turnKind=clarification only when you must ask for a missing room/setup choice before gameplay; otherwise use gameplay.",
     "7. If a check caused no persistent change, explain why in noStateChangeReason; never use that field to avoid saving a discovered clue.",
-    "8. Before resolving a declared player action, adjudicate it with trpg_gm_cli action adjudicate against the script, canon, rules, and established state. Reject unsupported or impossible actions with a concrete basis and reason; do not roll or mutate state for a rejected action.",
+    "8. Before resolving a declared player action, adjudicate it against the script, canon, rules, and established state. Every accepted action must persist resolution=automatic or check_required; check_required must lock the stat and dnd5e DC before rolling. Acceptance permits an attempt, not success. Until the required check resolves, do not persist progress, consequences, or another action. Reject unsupported or impossible actions with a concrete basis and reason; do not roll or mutate state for a rejected action.",
     "9. During character creation, configure scenario-grounded allowed/recommended skills and party fairness first; persist appearance, background, concept, chosen skills, and accepted/rejected ruling before rolling abilities and HP/MP/SAN maxima. After generation, prioritize an opening based on the character background: persist a concrete chapter/objective, introduce only the world situation, and invite the player to decide their first action.",
     "10. Read the immutable persistent guardrails returned by context before adjudication. A matching guardrail overrides an attempted acceptance to rejected; never paraphrase the action or submit a second ruling to bypass it. During setup, derive guardrail terms and paraphrase aliases from explicit scenario prohibitions with guardrail add.",
-    "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block with character, stat, degree, roll, and target to the finalized answer.",
-    "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random d100 unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
+    "11. Every resolved check must be reported to the player. The guard appends a canonical 判定結果 block; dnd5e reports d20, ability modifier, total, DC, and degree, while d100 systems report roll, target, and degree.",
+    "12. Typed tools already encode the correct call shape: action decision is accepted|rejected, accepted resolution is automatic|check_required, rejected resolution is not_applicable, entity state is an object, and context events is an integer. Copy PLAYER_ACTION exactly. Omit check roll for a random room-system die unless the player supplied a physical roll. Do not save recap every turn; save it only at campaign creation or a natural session break. Raw fallback shapes are [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,...] and [\"entity\",ROOM,KIND,ID,NAME,...].",
     "13. Use context.participation to give equal spotlight opportunities to all eligible players. Prefer next_spotlight_character_ids when inviting the next action. Only exclude a character whose persisted availability or HP says they cannot act; record other temporary inability with trpg_gm_character_availability.",
     "14. Read context.story_progress. After each accepted, countable player action, persist advanced or stalled with trpg_gm_story_progress. At three consecutive stalled actions, persist a concrete in-world event with trpg_gm_story_intervene before narrating or accepting another action; never replace the objective to evade this clock. A forced transition must happen directly through the world event, not by requiring the player to choose a prescribed option. After the scene changes, return an open-ended action prompt and confirm eventDrivenTransitionChecked=true.",
     "15. The GM is the storyteller: every accepted or rejected action, including one blocked by rules or impossibility, requires at least a short novel-like passage grounded in player-visible facts. For a rejected action, narrate the established obstacle, unchanged surroundings, or NPC/world response without making the rejected action occur or mutating the world, then state the reason and basis. Also offer a concise set of grounded next steps or prerequisites (normally one to three) that could make progress possible, such as inspecting the obstacle, obtaining an established tool, or finding another route; keep them non-prescriptive, do not force a choice, and do not invent undiscovered facts. Never respond only with a ruling summary such as ‘X did something / not allowed; what does Y do?’ and immediately hand off. Establish concrete objects, sensory atmosphere, and world activity without deciding a player character's thoughts, feelings, speech, movement, or reaction. Confirm this with narrativeDetailChecked=true.",
@@ -527,16 +542,38 @@ export default function trpgGmGuard(pi) {
     if (operation.check && operation.explicitRoll !== undefined) {
       const escapedRoll = String(operation.explicitRoll).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       const declaredRoll = new RegExp(
-        `(?:實體骰(?:結果)?(?:是|為)?|骰(?:值|點|結果)(?:是|為)?|roll(?:ed| result)?|d100)\\s*[:=：]?\\s*${escapedRoll}(?!\\d)`,
+        `(?:實體骰(?:結果)?(?:是|為)?|骰(?:值|點|結果)(?:是|為)?|roll(?:ed| result)?|d(?:20|100)\\s*(?:是|為)?)\\s*[:=：]?\\s*${escapedRoll}(?!\\d)`,
         "iu",
       ).test(turn.playerInput);
       if (!declaredRoll) {
-        throw new Error("Omit --roll for random d100; an explicit roll requires an unambiguous player-declared roll value.");
+        throw new Error("Omit --roll for a random room-system die; an explicit roll requires an unambiguous player-declared roll value.");
       }
     }
     const latestAction = turn.actionAdjudications.at(-1);
-    if (operation.check && latestAction?.decision !== "accepted") {
-      throw new Error("A check requires an accepted player action persisted earlier in the same turn.");
+    const hasLoadedPendingCheck = turn.storyProgress?.pendingActionEventId !== null
+      && ["check_required", "legacy_unclassified"].includes(turn.latestActionResolution);
+    if (
+      turn.requiredCheckPending
+      && (operation.action || operation.storyOperation === "progress"
+        || (operation.mutation && operation.requiresAcceptedAction))
+    ) {
+      throw new Error(
+        "The accepted action has a required check; resolve it before progress, consequences, or another action.",
+      );
+    }
+    if (
+      operation.check
+      && latestAction?.decision !== "accepted"
+      && !turn.requiredCheckPending
+      && !hasLoadedPendingCheck
+    ) {
+      throw new Error("A check requires an accepted player action persisted earlier in this or a loaded pending turn.");
+    }
+    if (
+      operation.check
+      && !["check_required", "legacy_unclassified"].includes(turn.latestActionResolution)
+    ) {
+      throw new Error("An automatic action must not resolve an unplanned check.");
     }
     if (
       operation.mutation
@@ -565,6 +602,9 @@ export default function trpgGmGuard(pi) {
       turn.participation = parseParticipation(result.stdout);
       turn.storyProgress = storyProgress;
       turn.openingGuidanceRequired = storyProgress.openingGuidanceRequired;
+      turn.latestActionResolution = storyProgress.pendingActionResolution;
+      turn.requiredCheckPending = storyProgress.pendingActionResolution === "check_required"
+        && !storyProgress.pendingCheckResolved;
     }
     if (operation.operationRoom) turn.operationRooms.add(operation.operationRoom);
     if (operation.characterProposal) {
@@ -643,6 +683,9 @@ export default function trpgGmGuard(pi) {
         turn.actionNeedsProgress = countsAsParticipation
           && adjudication.decision === "accepted"
           && turn.storyProgress !== null;
+        turn.latestActionResolution = rawAdjudication.resolution ?? null;
+        turn.requiredCheckPending = adjudication.decision === "accepted"
+          && rawAdjudication.resolution === "check_required";
         const participant = turn.participation?.find(
           (character) => character.characterId === adjudication.characterId,
         );
@@ -668,6 +711,7 @@ export default function trpgGmGuard(pi) {
       turn.checkOperationIndices.push(operationIndex);
       turn.checkReportAppended = false;
       turn.checkResolved = true;
+      turn.requiredCheckPending = false;
     }
     if (operation.mutation && !operation.doesNotResolveAction) {
       turn.mutationOperationIndices.push(operationIndex);
@@ -687,7 +731,7 @@ export default function trpgGmGuard(pi) {
   pi.registerTool({
     name: "trpg_gm_cli",
     label: "TRPG GM CLI",
-    description: "Run the persistent TRPG CLI with structured arguments. Use typed trpg_gm_rooms_list rather than raw CLI for room catalog queries. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON], [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"character\",\"availability\",ROOM,CHARACTER,\"--can-act\",\"true|false\",\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/upsert/resolve subcommand; the only global list operation is typed trpg_gm_rooms_list. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes participation and story-progress clocks plus immutable guardrails; matching guardrail terms force rejection, which cannot be replaced by another ruling in the same turn. Use story objective/progress/intervene commands; three stalled actions require a persisted intervention before another action.",
+    description: "Run the persistent TRPG CLI with structured arguments. Use typed trpg_gm_rooms_list rather than raw CLI for room catalog queries. Exact gameplay forms: [\"context\",ROOM,\"--events\",N], [\"action\",\"adjudicate\",ROOM,CHARACTER,PLAYER_ACTION,\"--decision\",\"accepted|rejected\",\"--basis\",BASIS,\"--reason\",REASON,\"--resolution\",\"automatic|check_required\"] with --check-stat STAT and dnd5e --check-dc DC when required, [\"check\",ROOM,CHARACTER,STAT] optionally followed by [\"--roll\",N], [\"entity\",ROOM,KIND,ID,NAME,\"--state\",JSON], [\"canon\",ROOM,KEY,VALUE,\"--source\",SOURCE], [\"character\",\"adjust\",ROOM,CHARACTER,RESOURCE,DELTA,\"--reason\",REASON], [\"character\",\"availability\",ROOM,CHARACTER,\"--can-act\",\"true|false\",\"--reason\",REASON], [\"recap\",\"save\",ROOM,\"--summary\",SUMMARY,\"--state\",JSON], and [\"events\",ROOM]. Copy the exact contiguous player wording into PLAYER_ACTION. JSON values must be one string token. There is no show/state/upsert/resolve subcommand; the only global list operation is typed trpg_gm_rooms_list. Put all positionals before options. Never use bash or direct SQLite for room state. Context includes participation and story-progress clocks plus immutable guardrails; matching guardrail terms force rejection, which cannot be replaced by another ruling in the same turn. Use story objective/progress/intervene commands; three stalled actions require a persisted intervention before another action.",
     promptSnippet: "Read or mutate persistent TRPG room state with verifiable structured CLI arguments",
     promptGuidelines: [
       "Use trpg_gm_cli instead of bash for every TRPG state command when the TRPG GM Guard is active.",
@@ -768,30 +812,46 @@ export default function trpgGmGuard(pi) {
   registerTypedTool({
     name: "trpg_gm_action_adjudicate",
     label: "TRPG Action Adjudicate",
-    description: "Persist exactly one ruling for the player's exact action text before checks or consequences.",
+    description: "Persist exactly one ruling for the player's exact action text. Accepted actions must declare automatic or check_required; check_required persists the stat and D&D DC before rolling.",
     parameters: {
       type: "object", additionalProperties: false,
-      required: ["db", "room", "character", "action", "decision", "basis", "reason"],
+      required: ["db", "room", "character", "action", "decision", "basis", "reason", "resolution"],
       properties: {
         ...dbRoomProperties,
         character: { type: "string" },
         action: { type: "string", description: "Exact contiguous wording copied from player input" },
         decision: { type: "string", enum: ["accepted", "rejected"] },
         basis: { type: "string" }, reason: { type: "string" },
+        resolution: { type: "string", enum: ["automatic", "check_required", "not_applicable"] },
+        checkStat: { type: "string" },
+        checkDc: { type: "integer", minimum: 1, maximum: 30 },
       },
     },
     async execute(_id, params, signal) {
-      return executeCli({ db: params.db, args: [
+      if (params.decision === "accepted" && !["automatic", "check_required"].includes(params.resolution)) {
+        throw new Error("Accepted action resolution must be automatic or check_required.");
+      }
+      if (params.decision === "rejected" && params.resolution !== "not_applicable") {
+        throw new Error("Rejected action resolution must be not_applicable.");
+      }
+      if (params.resolution === "check_required" && !params.checkStat?.trim()) {
+        throw new Error("check_required action must persist checkStat before rolling.");
+      }
+      const args = [
         "action", "adjudicate", params.room, params.character, params.action,
         "--decision", params.decision, "--basis", params.basis, "--reason", params.reason,
-      ] }, signal);
+      ];
+      if (params.decision === "accepted") args.push("--resolution", params.resolution);
+      if (params.checkStat) args.push("--check-stat", params.checkStat);
+      if (params.checkDc !== undefined) args.push("--check-dc", String(params.checkDc));
+      return executeCli({ db: params.db, args }, signal);
     },
   });
 
   registerTypedTool({
     name: "trpg_gm_check",
     label: "TRPG Check",
-    description: "Resolve and persist a check. Omit roll for random d100; only pass roll when the player explicitly supplied it.",
+    description: "Resolve the required persisted check using the room system. dnd5e rolls d20 against the locked DC; other supported systems roll d100. Omit roll unless the player explicitly supplied a physical roll.",
     parameters: {
       type: "object", additionalProperties: false,
       required: ["db", "room", "character", "stat"],
